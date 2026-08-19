@@ -104,10 +104,27 @@ class PDBManager:
             header_byte = (total_len << 1) | 1
             return bytearray([header_byte]) + bytearray(raw)
         else:
-            # Long ASCII
+            # Long ASCII: [0x40, len_u2, type_u1, ...ascii] to mirror _read_dsql_string
             total_len = len(raw) + 4
-            header = struct.pack("<HBB", total_len, 0x40, 0x03)
+            header = struct.pack("<BHB", 0x40, total_len, 0x03)
             return bytearray(header) + bytearray(raw)
+
+    def _string_alloc_size(self, abs_pos: int) -> int:
+        """Returns the total encoded byte length of the existing string at abs_pos."""
+        kind = self.data[abs_pos]
+        if kind in (0x40, 0x90):
+            return struct.unpack_from("<H", self.data, abs_pos + 1)[0]
+        return kind >> 1
+
+    def can_fit_strings(self, track: TrackInfo, new_filename: str, new_filepath: str) -> bool:
+        """Checks whether both replacement strings fit inside the existing heap allocations."""
+        row_base = track.page_idx * self.len_page + track.row_offset
+        for ofs, text in ((track.ofs_strings[19], new_filename), (track.ofs_strings[20], new_filepath)):
+            if ofs == 0:
+                continue
+            if len(self._encode_dsql_string(text)) > self._string_alloc_size(row_base + ofs):
+                return False
+        return True
 
     def _parse_tracks(self) -> List[TrackInfo]:
         """Parses all Track rows from Table 0."""
@@ -206,9 +223,17 @@ class PDBManager:
         new_sample_depth: int,
         new_bitrate: int,
     ) -> bool:
-        """Updates a track record in the PDB buffer."""
+        """Updates a track record in the PDB buffer.
+
+        Returns False (leaving the buffer untouched) if either replacement string
+        is longer than the existing heap allocation — growing a string in place
+        would overwrite adjacent heap data.
+        """
         page_offset = track.page_idx * self.len_page
         row_base = page_offset + track.row_offset
+
+        if not self.can_fit_strings(track, new_filename, new_filepath):
+            return False
 
         # Update binary numerical fields
         struct.pack_into("<I", self.data, row_base + 0x08, new_sample_rate)
@@ -216,33 +241,12 @@ class PDBManager:
         struct.pack_into("<I", self.data, row_base + 0x30, new_bitrate)
         struct.pack_into("<H", self.data, row_base + 0x52, new_sample_depth)
 
-        # Update filename (ofs_strings[19])
-        ofs_fn = track.ofs_strings[19]
-        if ofs_fn != 0:
-            fn_pos = row_base + ofs_fn
-            old_kind = self.data[fn_pos]
-            encoded_fn = self._encode_dsql_string(new_filename)
-            # If same length, write directly in-place
-            if (old_kind >> 1) == (encoded_fn[0] >> 1):
-                self.data[fn_pos : fn_pos + len(encoded_fn)] = encoded_fn
-            else:
-                # If length changed, write as much as fits or encode
-                if len(encoded_fn) <= (old_kind >> 1):
-                    self.data[fn_pos : fn_pos + len(encoded_fn)] = encoded_fn
-                else:
-                    # In rare cases where string is longer, overwrite in-place
-                    self.data[fn_pos : fn_pos + len(encoded_fn)] = encoded_fn
-
-        # Update filepath (ofs_strings[20])
-        ofs_fp = track.ofs_strings[20]
-        if ofs_fp != 0:
-            fp_pos = row_base + ofs_fp
-            old_kind = self.data[fp_pos]
-            encoded_fp = self._encode_dsql_string(new_filepath)
-            if (old_kind >> 1) == (encoded_fp[0] >> 1):
-                self.data[fp_pos : fp_pos + len(encoded_fp)] = encoded_fp
-            else:
-                self.data[fp_pos : fp_pos + len(encoded_fp)] = encoded_fp
+        # Update filename (ofs_strings[19]) and filepath (ofs_strings[20]) in place
+        for ofs, text in ((track.ofs_strings[19], new_filename), (track.ofs_strings[20], new_filepath)):
+            if ofs != 0:
+                pos = row_base + ofs
+                encoded = self._encode_dsql_string(text)
+                self.data[pos : pos + len(encoded)] = encoded
 
         # Increment page sequence number
         page_seq = struct.unpack_from("<I", self.data, page_offset + 0x10)[0]

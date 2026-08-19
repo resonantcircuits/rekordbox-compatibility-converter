@@ -7,7 +7,12 @@ from rekordbox_compatibility_converter.core.models import TrackInfo
 from rekordbox_compatibility_converter.core.pdb_manager import PDBManager
 
 
-def create_minimal_pdb(tmp_path: Path, file_size: int = 50000000) -> Path:
+def create_minimal_pdb(
+    tmp_path: Path,
+    file_size: int = 50000000,
+    filename: str = "song.flac",
+    filepath: str = "/Contents/song.flac",
+) -> Path:
     """Creates a valid, minimal DeviceSQL export.pdb for testing."""
     len_page = 4096
     num_tables = 1
@@ -61,13 +66,13 @@ def create_minimal_pdb(tmp_path: Path, file_size: int = 50000000) -> Path:
     page1[row_base + ofs_title] = (len(title_bytes) + 1) * 2 + 1
     page1[row_base + ofs_title + 1 : row_base + ofs_title + 1 + len(title_bytes)] = title_bytes
 
-    # Encode "song.flac" (len 9)
-    fn_bytes = b"song.flac"
+    # Encode filename
+    fn_bytes = filename.encode()
     page1[row_base + ofs_fn] = (len(fn_bytes) + 1) * 2 + 1
     page1[row_base + ofs_fn + 1 : row_base + ofs_fn + 1 + len(fn_bytes)] = fn_bytes
 
-    # Encode "/Contents/song.flac" (len 19)
-    fp_bytes = b"/Contents/song.flac"
+    # Encode filepath
+    fp_bytes = filepath.encode()
     page1[row_base + ofs_fp] = (len(fp_bytes) + 1) * 2 + 1
     page1[row_base + ofs_fp + 1 : row_base + ofs_fp + 1 + len(fp_bytes)] = fp_bytes
 
@@ -118,3 +123,49 @@ def test_pdb_parse_and_update(tmp_path: Path):
     assert t2.filename == "song.aiff"
     assert t2.file_path == "/Contents/song.aiff"
     assert t2.file_size == 60000000
+
+
+def test_pdb_refuses_growing_string(tmp_path: Path):
+    """A replacement longer than the original allocation must be rejected untouched,
+    never written in place (it would overwrite adjacent heap data)."""
+    pdb_path = create_minimal_pdb(tmp_path, filename="song.m4a", filepath="/Contents/song.m4a")
+    mgr = PDBManager(pdb_path)
+    track = mgr.tracks[0]
+    data_before = bytes(mgr.data)
+
+    assert mgr.can_fit_strings(track, "song.aiff", "/Contents/song.aiff") is False
+    ok = mgr.update_track(
+        track=track,
+        new_filename="song.aiff",
+        new_filepath="/Contents/song.aiff",
+        new_filesize=60000000,
+        new_sample_rate=44100,
+        new_sample_depth=16,
+        new_bitrate=1411200,
+    )
+    assert ok is False
+    assert bytes(mgr.data) == data_before
+
+    # Same-length and shorter replacements still succeed
+    assert mgr.can_fit_strings(track, "song.aiff"[:8], "/Contents/song.aiff"[:18]) is True
+    assert mgr.update_track(track, "song.mp3", "/Contents/song.mp3", 1, 44100, 16, 320000) is True
+    mgr.save(backup=False)
+    t2 = PDBManager(pdb_path).tracks[0]
+    assert t2.filename == "song.mp3"
+    assert t2.file_path == "/Contents/song.mp3"
+
+
+def test_dsql_long_string_roundtrip(tmp_path: Path):
+    """Long (>=127 byte) strings must encode with the header layout the reader expects."""
+    pdb_path = create_minimal_pdb(tmp_path)
+    mgr = PDBManager(pdb_path)
+
+    long_path = "/Contents/" + "a" * 140 + ".aiff"
+    encoded = mgr._encode_dsql_string(long_path)
+    assert encoded[0] == 0x40
+
+    buf = bytearray(1024)
+    buf[16 : 16 + len(encoded)] = encoded
+    text, pos, total = mgr._read_dsql_string(buf, 0, 16)
+    assert text == long_path
+    assert total == len(encoded)

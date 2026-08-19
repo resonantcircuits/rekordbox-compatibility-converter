@@ -48,3 +48,14 @@ def test_anlz_read_and_update(tmp_path: Path):
 
     # Verify backup exists
     assert (tmp_path / "ANLZ0000.DAT.bak").exists()
+
+
+def test_anlz_corrupt_zero_length_tag_does_not_hang(tmp_path: Path):
+    """A malformed section with tag_len=0 must not send the parser into an infinite loop."""
+    header = struct.pack(">4sII", b"PMAI", 28, 64) + (b"\x00" * 16)
+    bad_tag = struct.pack(">4sIII", b"PQTZ", 12, 0, 0)
+    anlz_file = tmp_path / "ANLZ0001.DAT"
+    anlz_file.write_bytes(header + bad_tag + b"\x00" * 8)
+
+    assert ANLZManager.read_path(anlz_file) is None
+    assert ANLZManager.update_path(anlz_file, "/Contents/x.aiff") is False

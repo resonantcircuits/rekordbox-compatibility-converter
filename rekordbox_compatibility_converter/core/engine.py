@@ -237,6 +237,19 @@ class ConversionEngine:
                 task.error = f"Source file not found: {task.source_abs_path}"
                 return False
 
+            # Bail out before converting if the database can't hold the new name
+            # (in-place patching cannot grow a heap string, e.g. .m4a -> .aiff)
+            with db_lock:
+                fits = pdb_manager.can_fit_strings(task.track, task.target_filename, task.target_usb_path)
+            if not fits:
+                task.status = "failed"
+                task.error = (
+                    f"Cannot patch export.pdb: '{task.target_filename}' is longer than "
+                    f"the original entry. Re-export from Rekordbox or pick a target format "
+                    f"with a shorter extension."
+                )
+                return False
+
             # Step 1: Audio conversion via FFmpeg
             success, new_size, err = self.audio_converter.convert(
                 source_path=task.source_abs_path,
@@ -253,20 +266,15 @@ class ConversionEngine:
 
             task.new_file_size = new_size
 
-            # Step 2: Update ANLZ files
-            if task.anlz_dat_path and task.anlz_dat_path.exists():
-                ANLZManager.update_path(task.anlz_dat_path, task.target_usb_path, backup=backup)
-            if task.anlz_ext_path and task.anlz_ext_path.exists():
-                ANLZManager.update_path(task.anlz_ext_path, task.target_usb_path, backup=backup)
-
-            # Step 3: Thread-safe database synchronization
+            # Step 2: Thread-safe database synchronization
             if task.target_format in (TargetFormat.AIFF, TargetFormat.WAV):
                 new_bitrate = task.target_sample_rate * 2 * task.target_sample_depth
             else:
                 new_bitrate = 320000
 
+            old_usb_path = task.track.file_path
             with db_lock:
-                pdb_manager.update_track(
+                db_ok = pdb_manager.update_track(
                     track=task.track,
                     new_filename=task.target_filename,
                     new_filepath=task.target_usb_path,
@@ -276,9 +284,21 @@ class ConversionEngine:
                     new_bitrate=new_bitrate,
                 )
 
+            if not db_ok:
+                task.status = "failed"
+                task.error = "export.pdb patch failed; original file and database entry left untouched."
+                return False
+
+            # Step 3: Update ANLZ files (only after the database patch succeeded)
+            if task.anlz_dat_path and task.anlz_dat_path.exists():
+                ANLZManager.update_path(task.anlz_dat_path, task.target_usb_path, backup=backup)
+            if task.anlz_ext_path and task.anlz_ext_path.exists():
+                ANLZManager.update_path(task.anlz_ext_path, task.target_usb_path, backup=backup)
+
+            with db_lock:
                 if summary.has_dlp:
                     dlp_manager.update_track_path(
-                        old_usb_path=task.track.file_path,
+                        old_usb_path=old_usb_path,
                         new_usb_path=task.target_usb_path,
                         new_filename=task.target_filename,
                         new_filesize=new_size,
@@ -288,7 +308,7 @@ class ConversionEngine:
                         backup=backup,
                     )
 
-            # Step 4: Delete original file (Option A)
+            # Step 4: Delete original file to reclaim USB space
             if delete_original and task.source_abs_path != task.target_abs_path:
                 try:
                     task.source_abs_path.unlink(missing_ok=True)

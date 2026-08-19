@@ -27,6 +27,8 @@ class ANLZManager:
 
         while pos + 12 <= len(data):
             fourcc, hdr_len, tag_len = struct.unpack_from(">4sII", data, pos)
+            if tag_len < 12:
+                return None
             if fourcc == b"PPTH":
                 len_path = struct.unpack_from(">I", data, pos + 12)[0]
                 if len_path > 2:
@@ -55,6 +57,8 @@ class ANLZManager:
 
         while pos + 12 <= len(data):
             fourcc, hdr_len, tag_len = struct.unpack_from(">4sII", data, pos)
+            if tag_len < 12:
+                break
             if fourcc == b"PPTH":
                 ppth_found = True
                 # Prepare new UTF-16BE path
