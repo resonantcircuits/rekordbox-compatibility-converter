@@ -1,4 +1,4 @@
-"""Modern, sleek Dark/Light mode GUI using CustomTkinter."""
+"""Modern, sleek Dark/Light mode GUI using CustomTkinter with dynamic theme styling."""
 
 import os
 import sys
@@ -6,14 +6,9 @@ import threading
 from pathlib import Path
 from typing import Dict, List, Optional
 
-try:
-    import customtkinter as ctk
-    from tkinter import filedialog, messagebox, ttk
-    import tkinter as tk
-except ImportError:
-    import tkinter as tk
-    from tkinter import filedialog, messagebox, ttk
-    ctk = None
+import customtkinter as ctk
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
 
 from ..core.audio_converter import AudioConverter
 from ..core.engine import ConversionEngine
@@ -22,19 +17,18 @@ from ..core.profiles import PROFILES, get_profile
 from ..core.usb_detector import USBDetector
 
 
-class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
+class ModernRekordboxGUI(ctk.CTk):
     """Modern DJ-styled cross-platform GUI for Rekordbox format conversion."""
 
     def __init__(self):
         super().__init__()
 
-        if ctk:
-            ctk.set_appearance_mode("dark")
-            ctk.set_default_color_theme("blue")
+        ctk.set_appearance_mode("dark")
+        ctk.set_default_color_theme("blue")
 
-        self.title("Rekordbox Format Checker & CDJ Converter")
-        self.geometry("960x760")
-        self.minsize(800, 600)
+        self.title("Rekordbox Compatibility Converter")
+        self.geometry("980x780")
+        self.minsize(820, 620)
 
         self.engine = ConversionEngine()
         self.summary: Optional[ScanSummary] = None
@@ -42,45 +36,96 @@ class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
         self.drive_map: Dict[str, Path] = {}
 
         self._build_ui()
+        self._apply_treeview_theme("dark")
         self._refresh_drives()
+
+    def _apply_treeview_theme(self, mode: str):
+        """Applies seamless Dark/Light styling to the ttk.Treeview table."""
+        style = ttk.Style()
+        style.theme_use("clam")
+
+        if mode == "dark":
+            bg_color = "#1E1E20"
+            fg_color = "#F2F2F7"
+            hdr_bg = "#2C2C2E"
+            hdr_fg = "#FFFFFF"
+            selected_bg = "#0A84FF"
+            border_color = "#3A3A3C"
+        else:
+            bg_color = "#FFFFFF"
+            fg_color = "#1C1C1E"
+            hdr_bg = "#E5E5EA"
+            hdr_fg = "#000000"
+            selected_bg = "#007AFF"
+            border_color = "#D1D1D6"
+
+        style.configure(
+            "Treeview",
+            background=bg_color,
+            foreground=fg_color,
+            fieldbackground=bg_color,
+            rowheight=26,
+            font=("Helvetica", 11),
+            borderwidth=0,
+        )
+        style.configure(
+            "Treeview.Heading",
+            background=hdr_bg,
+            foreground=hdr_fg,
+            relief="flat",
+            font=("Helvetica", 11, "bold"),
+            padding=5,
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", selected_bg)],
+            foreground=[("selected", "#FFFFFF")],
+        )
+        style.map(
+            "Treeview.Heading",
+            background=[("active", hdr_bg)],
+        )
+
+        if hasattr(self, "tree_container"):
+            self.tree_container.configure(bg=bg_color)
 
     def _build_ui(self):
         # 1. Header Banner
-        header_frame = ctk.CTkFrame(self, corner_radius=10)
-        header_frame.pack(fill="x", padx=16, pady=(16, 8))
+        header_frame = ctk.CTkFrame(self, corner_radius=12)
+        header_frame.pack(fill="x", padx=18, pady=(18, 8))
 
         title_lbl = ctk.CTkLabel(
             header_frame,
-            text="🎧 Rekordbox CDJ Format Converter",
-            font=ctk.CTkFont(size=20, weight="bold"),
+            text="🎧 Rekordbox Compatibility Converter",
+            font=ctk.CTkFont(size=21, weight="bold"),
         )
-        title_lbl.pack(side="left", padx=16, pady=12)
+        title_lbl.pack(side="left", padx=18, pady=12)
 
         theme_switch = ctk.CTkOptionMenu(
             header_frame,
             values=["Dark", "Light", "System"],
             command=self._change_theme,
-            width=100,
+            width=110,
         )
         theme_switch.set("Dark")
-        theme_switch.pack(side="right", padx=16, pady=12)
+        theme_switch.pack(side="right", padx=18, pady=12)
 
         # 2. Main Config Card
-        config_card = ctk.CTkFrame(self, corner_radius=10)
-        config_card.pack(fill="x", padx=16, pady=8)
+        config_card = ctk.CTkFrame(self, corner_radius=12)
+        config_card.pack(fill="x", padx=18, pady=6)
 
         # Drive Row
         drive_row = ctk.CTkFrame(config_card, fg_color="transparent")
-        drive_row.pack(fill="x", padx=16, pady=(12, 6))
+        drive_row.pack(fill="x", padx=16, pady=(14, 6))
 
         ctk.CTkLabel(drive_row, text="Rekordbox USB Drive:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 10))
-        self.drive_menu = ctk.CTkOptionMenu(drive_row, values=["Scanning..."], width=400, command=self._on_drive_selected)
+        self.drive_menu = ctk.CTkOptionMenu(drive_row, values=["Scanning..."], width=420, command=self._on_drive_selected)
         self.drive_menu.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        btn_browse = ctk.CTkButton(drive_row, text="📁 Browse...", width=100, command=self._browse_folder)
+        btn_browse = ctk.CTkButton(drive_row, text="📁 Browse...", width=105, command=self._browse_folder)
         btn_browse.pack(side="left", padx=(0, 6))
 
-        btn_refresh = ctk.CTkButton(drive_row, text="⟳ Refresh", width=90, fg_color="#3A3A3C", hover_color="#48484A", command=self._refresh_drives)
+        btn_refresh = ctk.CTkButton(drive_row, text="⟳ Refresh", width=95, fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"), command=self._refresh_drives)
         btn_refresh.pack(side="left")
 
         # Profile & Format Row
@@ -108,7 +153,7 @@ class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
 
         # Switches Row
         switches_row = ctk.CTkFrame(config_card, fg_color="transparent")
-        switches_row.pack(fill="x", padx=16, pady=(4, 12))
+        switches_row.pack(fill="x", padx=16, pady=(4, 14))
 
         self.del_switch = ctk.CTkSwitch(switches_row, text="Delete originals after conversion (Option A)")
         self.del_switch.select()
@@ -122,22 +167,40 @@ class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
         self.backup_switch.select()
         self.backup_switch.pack(side="left")
 
-        # 3. Stats Dashboard Cards
+        # 3. Dynamic Stats Dashboard Cards
         stats_frame = ctk.CTkFrame(self, fg_color="transparent")
-        stats_frame.pack(fill="x", padx=16, pady=4)
+        stats_frame.pack(fill="x", padx=18, pady=4)
 
-        self.card_total = self._create_stat_card(stats_frame, "TOTAL TRACKS", "--", "#2C2C2E")
+        self.card_total = self._create_stat_card(
+            stats_frame,
+            title="TOTAL TRACKS",
+            initial_val="--",
+            fg_color=("#E5E5EA", "#2C2C2E"),
+            text_color=("#1C1C1E", "#FFFFFF"),
+        )
         self.card_total.pack(side="left", fill="x", expand=True, padx=(0, 8))
 
-        self.card_compat = self._create_stat_card(stats_frame, "COMPATIBLE", "--", "#1E382B")
+        self.card_compat = self._create_stat_card(
+            stats_frame,
+            title="COMPATIBLE",
+            initial_val="--",
+            fg_color=("#D4EDDA", "#1C3826"),
+            text_color=("#155724", "#30D158"),
+        )
         self.card_compat.pack(side="left", fill="x", expand=True, padx=4)
 
-        self.card_incompat = self._create_stat_card(stats_frame, "INCOMPATIBLE", "--", "#3D2424")
+        self.card_incompat = self._create_stat_card(
+            stats_frame,
+            title="INCOMPATIBLE",
+            initial_val="--",
+            fg_color=("#F8D7DA", "#3E1E1E"),
+            text_color=("#721C24", "#FF453A"),
+        )
         self.card_incompat.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
         # 4. Action Buttons Bar
         action_bar = ctk.CTkFrame(self, fg_color="transparent")
-        action_bar.pack(fill="x", padx=16, pady=8)
+        action_bar.pack(fill="x", padx=18, pady=8)
 
         self.btn_scan = ctk.CTkButton(
             action_bar,
@@ -152,9 +215,9 @@ class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
             action_bar,
             text="⚡ Convert Incompatible Tracks",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color="#30D158",
-            hover_color="#28CD41",
-            text_color="#000000",
+            fg_color=("#28A745", "#30D158"),
+            hover_color=("#218838", "#28CD41"),
+            text_color=("#FFFFFF", "#000000"),
             height=38,
             state="disabled",
             command=self._start_conversion,
@@ -164,27 +227,26 @@ class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
         self.btn_restore = ctk.CTkButton(
             action_bar,
             text="↺ Restore Backup",
-            fg_color="#3A3A3C",
-            hover_color="#48484A",
+            fg_color=("gray75", "gray30"),
+            hover_color=("gray65", "gray40"),
             height=38,
             command=self._restore_backup,
         )
         self.btn_restore.pack(side="left")
 
         # 5. Track Table View
-        table_card = ctk.CTkFrame(self, corner_radius=10)
-        table_card.pack(fill="both", expand=True, padx=16, pady=6)
+        table_card = ctk.CTkFrame(self, corner_radius=12)
+        table_card.pack(fill="both", expand=True, padx=18, pady=6)
 
         table_header = ctk.CTkFrame(table_card, fg_color="transparent")
-        table_header.pack(fill="x", padx=12, pady=(10, 4))
+        table_header.pack(fill="x", padx=14, pady=(10, 4))
         ctk.CTkLabel(table_header, text="Tracks Requiring Conversion", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
 
-        # Treeview styled inside CTkFrame
-        tree_container = tk.Frame(table_card, bg="#1C1C1E")
-        tree_container.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.tree_container = tk.Frame(table_card, bg="#1E1E20")
+        self.tree_container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
 
         columns = ("id", "title", "format", "specs", "target")
-        self.tree = ttk.Treeview(tree_container, columns=columns, show="headings", selectmode="browse")
+        self.tree = ttk.Treeview(self.tree_container, columns=columns, show="headings", selectmode="browse")
         self.tree.heading("id", text="ID")
         self.tree.heading("title", text="Track Title")
         self.tree.heading("format", text="Format")
@@ -192,39 +254,40 @@ class ModernRekordboxGUI(ctk.CTk if ctk else tk.Tk):
         self.tree.heading("target", text="Target Format")
 
         self.tree.column("id", width=60, anchor="center")
-        self.tree.column("title", width=340)
+        self.tree.column("title", width=360)
         self.tree.column("format", width=90, anchor="center")
         self.tree.column("specs", width=140, anchor="center")
         self.tree.column("target", width=140, anchor="center")
 
-        tree_scroll = ttk.Scrollbar(tree_container, orient="vertical", command=self.tree.yview)
+        tree_scroll = ttk.Scrollbar(self.tree_container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
         self.tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="right", fill="y")
 
         # 6. Bottom Progress & Status Bar
-        bottom_frame = ctk.CTkFrame(self, corner_radius=10)
-        bottom_frame.pack(fill="x", padx=16, pady=(4, 16))
+        bottom_frame = ctk.CTkFrame(self, corner_radius=12)
+        bottom_frame.pack(fill="x", padx=18, pady=(4, 18))
 
         self.progress_bar = ctk.CTkProgressBar(bottom_frame)
         self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", padx=14, pady=(10, 4))
+        self.progress_bar.pack(fill="x", padx=16, pady=(12, 4))
 
         self.lbl_status = ctk.CTkLabel(bottom_frame, text="Ready. Select a drive and click 'Scan USB Drive'.", font=ctk.CTkFont(size=12))
-        self.lbl_status.pack(side="left", padx=14, pady=(0, 8))
+        self.lbl_status.pack(side="left", padx=16, pady=(0, 10))
 
-    def _create_stat_card(self, parent, title: str, initial_val: str, bg_color: str):
-        card = ctk.CTkFrame(parent, corner_radius=8, fg_color=bg_color)
-        lbl_title = ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=10, weight="bold"), text_color="#AEAEB2")
-        lbl_title.pack(pady=(8, 0))
-        lbl_val = ctk.CTkLabel(card, text=initial_val, font=ctk.CTkFont(size=22, weight="bold"))
-        lbl_val.pack(pady=(0, 8))
+    def _create_stat_card(self, parent, title: str, initial_val: str, fg_color: tuple, text_color: tuple):
+        card = ctk.CTkFrame(parent, corner_radius=10, fg_color=fg_color)
+        lbl_title = ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=11, weight="bold"), text_color=text_color)
+        lbl_title.pack(pady=(10, 0))
+        lbl_val = ctk.CTkLabel(card, text=initial_val, font=ctk.CTkFont(size=24, weight="bold"), text_color=text_color)
+        lbl_val.pack(pady=(0, 10))
         card.val_label = lbl_val
         return card
 
     def _change_theme(self, mode: str):
-        if ctk:
-            ctk.set_appearance_mode(mode.lower())
+        ctk.set_appearance_mode(mode.lower())
+        current = ctk.get_appearance_mode().lower()
+        self._apply_treeview_theme(current)
 
     def _refresh_drives(self):
         detected = USBDetector.list_rekordbox_drives()
