@@ -92,12 +92,12 @@ class ModernRekordboxGUI(ctk.CTk):
     def _build_ui(self):
         # 1. Header Banner
         header_frame = ctk.CTkFrame(self, corner_radius=12)
-        header_frame.pack(fill="x", padx=18, pady=(18, 8))
+        header_frame.pack(side="top", fill="x", padx=18, pady=(16, 6))
 
         title_lbl = ctk.CTkLabel(
             header_frame,
-            text="🎧 Rekordbox Compatibility Converter",
-            font=ctk.CTkFont(size=21, weight="bold"),
+            text="Rekordbox Compatibility Converter",
+            font=ctk.CTkFont(size=20, weight="bold"),
         )
         title_lbl.pack(side="left", padx=18, pady=12)
 
@@ -110,39 +110,61 @@ class ModernRekordboxGUI(ctk.CTk):
         theme_switch.set("Dark")
         theme_switch.pack(side="right", padx=18, pady=12)
 
-        # 2. Main Config Card
+        # 2. Bottom Progress & Status Bar (Pinned to bottom so it is never clipped)
+        bottom_frame = ctk.CTkFrame(self, corner_radius=12)
+        bottom_frame.pack(side="bottom", fill="x", padx=18, pady=(6, 16))
+
+        self.progress_bar = ctk.CTkProgressBar(bottom_frame, height=12)
+        self.progress_bar.set(0)
+        self.progress_bar.pack(fill="x", padx=16, pady=(12, 6))
+
+        self.lbl_status = ctk.CTkLabel(
+            bottom_frame,
+            text="Ready. Select a drive and click 'Scan USB Drive'.",
+            font=ctk.CTkFont(size=12),
+            anchor="w",
+        )
+        self.lbl_status.pack(fill="x", padx=16, pady=(0, 10))
+
+        # 3. Main Config Card
         config_card = ctk.CTkFrame(self, corner_radius=12)
-        config_card.pack(fill="x", padx=18, pady=6)
+        config_card.pack(side="top", fill="x", padx=18, pady=6)
 
         # Drive Row
         drive_row = ctk.CTkFrame(config_card, fg_color="transparent")
-        drive_row.pack(fill="x", padx=16, pady=(14, 6))
+        drive_row.pack(fill="x", padx=16, pady=(12, 6))
 
         ctk.CTkLabel(drive_row, text="Rekordbox USB Drive:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 10))
         self.drive_menu = ctk.CTkOptionMenu(drive_row, values=["Scanning..."], width=420, command=self._on_drive_selected)
         self.drive_menu.pack(side="left", fill="x", expand=True, padx=(0, 10))
 
-        btn_browse = ctk.CTkButton(drive_row, text="📁 Browse...", width=105, command=self._browse_folder)
+        btn_browse = ctk.CTkButton(drive_row, text="Browse...", width=100, command=self._browse_folder)
         btn_browse.pack(side="left", padx=(0, 6))
 
-        btn_refresh = ctk.CTkButton(drive_row, text="⟳ Refresh", width=95, fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"), command=self._refresh_drives)
+        btn_refresh = ctk.CTkButton(drive_row, text="Refresh", width=90, fg_color=("gray75", "gray30"), hover_color=("gray65", "gray40"), command=self._refresh_drives)
         btn_refresh.pack(side="left")
 
         # Profile & Format Row
         settings_row = ctk.CTkFrame(config_card, fg_color="transparent")
-        settings_row.pack(fill="x", padx=16, pady=6)
+        settings_row.pack(fill="x", padx=16, pady=(4, 2))
 
-        ctk.CTkLabel(settings_row, text="Target Profile:").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(settings_row, text="Target Profile:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 6))
         self.profile_var = ctk.StringVar(value="standard")
-        profile_menu = ctk.CTkOptionMenu(settings_row, values=["standard", "maximum", "modern"], variable=self.profile_var, width=130)
+        profile_menu = ctk.CTkOptionMenu(
+            settings_row,
+            values=["standard", "maximum", "modern"],
+            variable=self.profile_var,
+            width=140,
+            command=self._on_profile_changed,
+        )
         profile_menu.pack(side="left", padx=(0, 20))
 
-        ctk.CTkLabel(settings_row, text="Target Format:").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(settings_row, text="Target Format:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 6))
         self.format_var = ctk.StringVar(value="aiff")
         format_menu = ctk.CTkOptionMenu(settings_row, values=["aiff", "wav", "mp3"], variable=self.format_var, width=100)
         format_menu.pack(side="left", padx=(0, 20))
 
-        ctk.CTkLabel(settings_row, text="Threads:").pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(settings_row, text="Parallel Threads:", font=ctk.CTkFont(weight="bold")).pack(side="left", padx=(0, 6))
         self.threads_slider = ctk.CTkSlider(settings_row, from_=1, to=16, number_of_steps=15, width=120)
         self.threads_slider.set(min(8, os.cpu_count() or 4))
         self.threads_slider.pack(side="left", padx=(0, 6))
@@ -151,25 +173,36 @@ class ModernRekordboxGUI(ctk.CTk):
         self.threads_lbl.pack(side="left")
         self.threads_slider.configure(command=lambda val: self.threads_lbl.configure(text=f"{int(val)}"))
 
+        # Profile Description Subtitle
+        self.lbl_profile_desc = ctk.CTkLabel(
+            config_card,
+            text="Standard Club: Converts FLAC/ALAC to AIFF and downsizes >48kHz. Compatible with CDJ-2000NXS, CDJ-900NXS, XDJ-1000/700/RX/RX2.",
+            font=ctk.CTkFont(size=11),
+            text_color=("gray40", "gray70"),
+            anchor="w",
+            justify="left",
+        )
+        self.lbl_profile_desc.pack(fill="x", padx=16, pady=(2, 6))
+
         # Switches Row
         switches_row = ctk.CTkFrame(config_card, fg_color="transparent")
-        switches_row.pack(fill="x", padx=16, pady=(4, 14))
+        switches_row.pack(fill="x", padx=16, pady=(4, 12))
 
-        self.del_switch = ctk.CTkSwitch(switches_row, text="Delete originals after conversion (Option A)")
+        self.del_switch = ctk.CTkSwitch(switches_row, text="Delete original files after conversion (saves USB space)")
         self.del_switch.select()
-        self.del_switch.pack(side="left", padx=(0, 16))
+        self.del_switch.pack(side="left", padx=(0, 18))
 
-        self.dotfiles_switch = ctk.CTkSwitch(switches_row, text="Clean macOS ghost files (._*)")
+        self.dotfiles_switch = ctk.CTkSwitch(switches_row, text="Clean macOS ghost files (._* and .DS_Store)")
         self.dotfiles_switch.select()
-        self.dotfiles_switch.pack(side="left", padx=(0, 16))
+        self.dotfiles_switch.pack(side="left", padx=(0, 18))
 
-        self.backup_switch = ctk.CTkSwitch(switches_row, text="Create .bak backups")
+        self.backup_switch = ctk.CTkSwitch(switches_row, text="Create database backups (.bak)")
         self.backup_switch.select()
         self.backup_switch.pack(side="left")
 
-        # 3. Dynamic Stats Dashboard Cards
+        # 4. Dynamic Stats Dashboard Cards
         stats_frame = ctk.CTkFrame(self, fg_color="transparent")
-        stats_frame.pack(fill="x", padx=18, pady=4)
+        stats_frame.pack(side="top", fill="x", padx=18, pady=4)
 
         self.card_total = self._create_stat_card(
             stats_frame,
@@ -198,13 +231,13 @@ class ModernRekordboxGUI(ctk.CTk):
         )
         self.card_incompat.pack(side="left", fill="x", expand=True, padx=(8, 0))
 
-        # 4. Action Buttons Bar
+        # 5. Action Buttons Bar
         action_bar = ctk.CTkFrame(self, fg_color="transparent")
-        action_bar.pack(fill="x", padx=18, pady=8)
+        action_bar.pack(side="top", fill="x", padx=18, pady=6)
 
         self.btn_scan = ctk.CTkButton(
             action_bar,
-            text="🔍 Scan USB Drive",
+            text="Scan USB Drive",
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=("#007AFF", "#0A84FF"),
             hover_color=("#0062CC", "#0071E3"),
@@ -217,7 +250,7 @@ class ModernRekordboxGUI(ctk.CTk):
 
         self.btn_convert = ctk.CTkButton(
             action_bar,
-            text="⚡ Convert Incompatible Tracks",
+            text="Convert Incompatible Tracks",
             font=ctk.CTkFont(size=14, weight="bold"),
             fg_color=("#28A745", "#2EA043"),
             hover_color=("#218838", "#3FB950"),
@@ -232,7 +265,7 @@ class ModernRekordboxGUI(ctk.CTk):
 
         self.btn_restore = ctk.CTkButton(
             action_bar,
-            text="↺ Restore Backup",
+            text="Restore Backup",
             font=ctk.CTkFont(size=13),
             fg_color=("gray75", "#3A3A3C"),
             hover_color=("gray65", "#48484A"),
@@ -243,16 +276,16 @@ class ModernRekordboxGUI(ctk.CTk):
         )
         self.btn_restore.pack(side="left")
 
-        # 5. Track Table View
+        # 6. Track Table View (Takes all remaining vertical space)
         table_card = ctk.CTkFrame(self, corner_radius=12)
-        table_card.pack(fill="both", expand=True, padx=18, pady=6)
+        table_card.pack(side="top", fill="both", expand=True, padx=18, pady=(4, 6))
 
         table_header = ctk.CTkFrame(table_card, fg_color="transparent")
-        table_header.pack(fill="x", padx=14, pady=(10, 4))
+        table_header.pack(fill="x", padx=14, pady=(8, 4))
         ctk.CTkLabel(table_header, text="Tracks Requiring Conversion", font=ctk.CTkFont(size=14, weight="bold")).pack(side="left")
 
         self.tree_container = tk.Frame(table_card, bg="#1E1E20")
-        self.tree_container.pack(fill="both", expand=True, padx=12, pady=(0, 12))
+        self.tree_container.pack(fill="both", expand=True, padx=12, pady=(0, 10))
 
         columns = ("id", "title", "format", "specs", "target")
         self.tree = ttk.Treeview(self.tree_container, columns=columns, show="headings", selectmode="browse")
@@ -273,17 +306,6 @@ class ModernRekordboxGUI(ctk.CTk):
         self.tree.pack(side="left", fill="both", expand=True)
         tree_scroll.pack(side="right", fill="y")
 
-        # 6. Bottom Progress & Status Bar
-        bottom_frame = ctk.CTkFrame(self, corner_radius=12)
-        bottom_frame.pack(fill="x", padx=18, pady=(4, 18))
-
-        self.progress_bar = ctk.CTkProgressBar(bottom_frame)
-        self.progress_bar.set(0)
-        self.progress_bar.pack(fill="x", padx=16, pady=(12, 4))
-
-        self.lbl_status = ctk.CTkLabel(bottom_frame, text="Ready. Select a drive and click 'Scan USB Drive'.", font=ctk.CTkFont(size=12))
-        self.lbl_status.pack(side="left", padx=16, pady=(0, 10))
-
     def _create_stat_card(self, parent, title: str, initial_val: str, fg_color: tuple, text_color: tuple):
         card = ctk.CTkFrame(parent, corner_radius=10, fg_color=fg_color)
         lbl_title = ctk.CTkLabel(card, text=title, font=ctk.CTkFont(size=11, weight="bold"), text_color=text_color)
@@ -297,6 +319,16 @@ class ModernRekordboxGUI(ctk.CTk):
         ctk.set_appearance_mode(mode.lower())
         current = ctk.get_appearance_mode().lower()
         self._apply_treeview_theme(current)
+
+    def _on_profile_changed(self, choice: str):
+        descriptions = {
+            "standard": "Standard Club: Converts FLAC/ALAC to AIFF and downsizes >48kHz. Compatible with CDJ-2000NXS, CDJ-900NXS, XDJ-1000/700/RX/RX2.",
+            "maximum": "Maximum Compatibility: Strictly enforces 16-bit 44.1kHz AIFF for vintage gear (CDJ-2000 orig, CDJ-850, CDJ-350, XDJ-AERO).",
+            "modern": "Modern Flagship: Allows FLAC, ALAC, and high-res audio up to 24-bit 96kHz for CDJ-3000, CDJ-2000NXS2, XDJ-XZ, XDJ-RX3, OPUS-QUAD.",
+        }
+        self.lbl_profile_desc.configure(text=descriptions.get(choice, ""))
+        if self.summary:
+            self._start_scan()
 
     def _refresh_drives(self):
         detected = USBDetector.list_rekordbox_drives()
