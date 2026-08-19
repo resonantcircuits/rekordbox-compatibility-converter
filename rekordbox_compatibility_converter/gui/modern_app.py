@@ -631,7 +631,37 @@ class ModernRekordboxGUI(ctk.CTk):
                 )
             )
 
-        if incompat > 0:
+        insufficient_space = (
+            incompat > 0
+            and self.summary.required_space_bytes > self.summary.free_space_bytes
+        )
+        if insufficient_space:
+            mib = 1024 * 1024
+            required_mib = (self.summary.required_space_bytes + mib - 1) // mib
+            free_mib = self.summary.free_space_bytes // mib
+            recommended_mib = ((required_mib + 99) // 100) * 100
+            self.btn_convert.configure(state="disabled")
+            self.lbl_status.configure(
+                text=(
+                    f"Not enough USB space: about {required_mib} MiB required, "
+                    f"{free_mib} MiB free."
+                )
+            )
+            messagebox.showerror(
+                "Not Enough Space on the USB",
+                f"This conversion needs approximately {required_mib} MiB of free space on the "
+                f"USB, but only {free_mib} MiB is available.\n\n"
+                "Using your computer's temporary folder would not solve this safely: the final "
+                "converted files must still fit on the USB, and Step 1 keeps the originals so "
+                "the existing OneLibrary links remain recoverable until Step 2 succeeds.\n\n"
+                "What to do:\n"
+                f"1. Make at least {recommended_mib} MiB free on the USB, preferably by removing "
+                "exported content through Rekordbox rather than deleting referenced files in "
+                "Finder or Explorer.\n"
+                "2. Alternatively, re-export the library to a larger USB.\n"
+                "3. Scan the USB again.",
+            )
+        elif incompat > 0:
             self.btn_convert.configure(state="normal")
         else:
             self.btn_convert.configure(state="disabled")

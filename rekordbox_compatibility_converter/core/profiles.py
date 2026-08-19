@@ -108,8 +108,14 @@ class HardwareProfile:
                 f"Sample rate {track.sample_rate} Hz exceeds maximum supported {self.max_sample_rate} Hz."
             )
 
-        # Check bit depth
-        if track.sample_depth not in self.allowed_sample_depths:
+        # Encoded AAC and MP3 do not have a hardware-facing PCM sample depth.
+        # Rekordbox may store values such as 32 in this field even though the
+        # decoder reports ordinary AAC/MP3 audio, so applying PCM depth limits
+        # would create false incompatibility results.
+        if (
+            effective_format not in {"aac", "mp3"}
+            and track.sample_depth not in self.allowed_sample_depths
+        ):
             is_compatible = False
             reasons.append(
                 f"Sample depth {track.sample_depth}-bit is not in supported depths {sorted(self.allowed_sample_depths)}."

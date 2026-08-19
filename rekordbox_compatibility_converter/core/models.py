@@ -87,5 +87,6 @@ class ScanSummary:
     onelibrary_bridge_mode: bool = False
     free_space_bytes: int = 0
     estimated_extra_bytes: int = 0
+    required_space_bytes: int = 0
     unsupported_reason: Optional[str] = None
     pdb_sha256: str = ""

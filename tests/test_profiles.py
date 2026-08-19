@@ -119,6 +119,19 @@ def test_standard_and_modern_profiles_accept_aac_in_mp4_container():
     assert get_profile(CompatibilityProfileType.MODERN).evaluate(track).is_compatible is True
 
 
+def test_profiles_ignore_meaningless_pcm_depth_for_aac():
+    track = TrackInfo(
+        id=13,
+        filename="track.m4a",
+        codec_name="aac",
+        sample_rate=44100,
+        sample_depth=32,
+    )
+
+    assert get_profile(CompatibilityProfileType.STANDARD).evaluate(track).is_compatible is True
+    assert get_profile(CompatibilityProfileType.MODERN).evaluate(track).is_compatible is True
+
+
 def test_profiles_reject_alac_in_mp4_container():
     track = TrackInfo(
         id=10,

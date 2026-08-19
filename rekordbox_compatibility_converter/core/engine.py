@@ -47,6 +47,49 @@ class ConversionEngine:
         return str(path.resolve(strict=False)).casefold()
 
     @staticmethod
+    def estimate_required_space(summary: ScanSummary, backup: bool = True) -> int:
+        """Estimates peak USB space for staged outputs and atomic metadata updates."""
+        required_space = 0
+        for task in summary.tasks:
+            if task.track.duration > 0:
+                if task.target_format == TargetFormat.MP3:
+                    output_estimate = int(task.track.duration * 320000 / 8)
+                else:
+                    output_estimate = int(
+                        task.track.duration
+                        * task.target_sample_rate
+                        * max(1, task.track.channels)
+                        * task.target_sample_depth
+                        / 8
+                    )
+            elif task.source_abs_path.is_file():
+                output_estimate = max(
+                    task.source_abs_path.stat().st_size * 3,
+                    1024 * 1024,
+                )
+            else:
+                output_estimate = 1024 * 1024
+            required_space += int(output_estimate * 1.05) + 1024 * 1024
+
+        sidecar_bytes = sum(
+            path.stat().st_size
+            for path in {
+                sidecar
+                for task in summary.tasks
+                for sidecar in (task.anlz_dat_path, task.anlz_ext_path)
+                if sidecar and sidecar.is_file()
+            }
+        )
+        pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
+        pdb_bytes = pdb_path.stat().st_size if pdb_path.is_file() else 0
+
+        # Atomic rewrites need temporary copies even without persistent .bak files.
+        required_space += pdb_bytes + sidecar_bytes
+        if backup:
+            required_space += pdb_bytes + sidecar_bytes
+        return required_space
+
+    @staticmethod
     def _restore_file_bytes(path: Path, data: bytes) -> None:
         temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.restore.tmp")
         try:
@@ -222,6 +265,7 @@ class ConversionEngine:
                         estimate = int(track.duration * target_sr * 2 * target_sd / 8)
                     summary.estimated_extra_bytes += estimate
 
+        summary.required_space_bytes = self.estimate_required_space(summary, backup=True)
         return summary
 
     def clean_dotfiles(self, usb_root: Path) -> int:
@@ -536,38 +580,7 @@ class ConversionEngine:
 
         # Parallel workers can have every converted output staged at once, so
         # deletion of originals cannot be counted as space available up front.
-        required_space = 0
-        for task in summary.tasks:
-            if task.track.duration > 0:
-                if task.target_format == TargetFormat.MP3:
-                    output_estimate = int(task.track.duration * 320000 / 8)
-                else:
-                    output_estimate = int(
-                        task.track.duration
-                        * task.target_sample_rate
-                        * max(1, task.track.channels)
-                        * task.target_sample_depth
-                        / 8
-                    )
-            else:
-                # A conservative fallback for missing duration metadata.
-                output_estimate = max(task.source_abs_path.stat().st_size * 3, 1024 * 1024)
-            required_space += int(output_estimate * 1.05) + 1024 * 1024
-
-        sidecar_bytes = sum(
-            path.stat().st_size
-            for path in {
-                sidecar
-                for task in summary.tasks
-                for sidecar in (task.anlz_dat_path, task.anlz_ext_path)
-                if sidecar and sidecar.is_file()
-            }
-        )
-        # Atomic database and sidecar rewrites need temporary copies even when
-        # persistent .bak creation is disabled.
-        required_space += pdb_path.stat().st_size + sidecar_bytes
-        if backup:
-            required_space += pdb_path.stat().st_size + sidecar_bytes
+        required_space = self.estimate_required_space(summary, backup=backup)
 
         try:
             free_space = shutil.disk_usage(summary.usb_root).free

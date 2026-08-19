@@ -70,6 +70,7 @@ def test_engine_scan_and_execute_parallel(mock_usb: Path):
     assert summary.total_tracks == 1
     assert summary.incompatible_tracks == 1
     assert len(summary.tasks) == 1
+    assert summary.required_space_bytes > summary.estimated_extra_bytes
 
     task = summary.tasks[0]
     assert task.target_filename == "song.aiff"
