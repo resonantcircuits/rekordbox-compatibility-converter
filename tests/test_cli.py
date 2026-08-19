@@ -20,4 +20,6 @@ def test_scan_device_library_plus_returns_nonzero(tmp_path):
     result = CliRunner().invoke(cli, ["scan", str(tmp_path)])
 
     assert result.exit_code != 0
-    assert "Device Library Plus" in result.output
+    assert "OneLibrary" in result.output
+    assert "No files were changed" in result.output
+    assert "will not reliably fall back" in result.output

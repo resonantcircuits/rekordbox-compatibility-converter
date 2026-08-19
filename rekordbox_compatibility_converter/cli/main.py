@@ -12,6 +12,7 @@ from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRe
 from rich.table import Table
 
 from ..core.audio_converter import AudioConverter
+from ..core.dlp_manager import ONELIBRARY_REBUILD_REQUIRED_MESSAGE
 from ..core.engine import ConversionEngine
 from ..core.models import CompatibilityProfileType, TargetFormat
 from ..core.profiles import PROFILES, get_profile
@@ -81,7 +82,17 @@ def cli(ctx):
     default="aiff",
     help="Target conversion format (default: aiff).",
 )
-def scan(path: Optional[str], profile: str, target_format: str):
+@click.option(
+    "--experimental-onelibrary-bridge",
+    is_flag=True,
+    help="Scan Device Library even when OneLibrary is present; OneLibrary is not modified.",
+)
+def scan(
+    path: Optional[str],
+    profile: str,
+    target_format: str,
+    experimental_onelibrary_bridge: bool,
+):
     """Scans a Rekordbox USB drive and reports compatibility status."""
     usb_root = resolve_usb_path(path)
     hw_profile = get_profile(CompatibilityProfileType(profile))
@@ -102,18 +113,28 @@ def scan(path: Optional[str], profile: str, target_format: str):
             usb_root=usb_root,
             profile=hw_profile,
             forced_target_format=TargetFormat(target_format.lower()),
+            allow_onelibrary_bridge=experimental_onelibrary_bridge,
         )
 
     if not summary.has_export_pdb:
         if summary.has_dlp:
-            raise click.ClickException(
-                "This is a Device Library Plus-only export. Safe exportLibrary.db support is not implemented."
-            )
+            raise click.ClickException(summary.unsupported_reason)
         if summary.unsupported_reason:
             raise click.ClickException(summary.unsupported_reason)
         raise click.ClickException("No PIONEER/rekordbox/export.pdb found on this drive.")
-    if summary.has_dlp:
-        raise click.ClickException(summary.unsupported_reason or "Device Library Plus is unsupported.")
+    if summary.has_dlp and not summary.onelibrary_bridge_mode:
+        raise click.ClickException(summary.unsupported_reason or "OneLibrary is unsupported.")
+
+    if summary.onelibrary_bridge_mode:
+        console.print(
+            Panel(
+                "[bold yellow]Experimental OneLibrary bridge scan.[/bold yellow]\n"
+                "Only Device Library will be planned for conversion. OneLibrary remains unchanged "
+                "until Rekordbox's Convert from Device Library command is run.",
+                title="OneLibrary Follow-up Required",
+                border_style="yellow",
+            )
+        )
 
     table = Table(title="Audio Format Breakdown", show_header=True, header_style="bold magenta")
     table.add_column("Format", style="cyan")
@@ -158,9 +179,10 @@ def scan(path: Optional[str], profile: str, target_format: str):
     if len(summary.tasks) > 10:
         console.print(f"[dim]... and {len(summary.tasks) - 10} more tracks.[/dim]\n")
 
+    bridge_flag = " --experimental-onelibrary-bridge" if summary.onelibrary_bridge_mode else ""
     console.print(
         f"[yellow]To convert these tracks, run:[/yellow] "
-        f"[bold cyan]rbconvert convert {escape(str(usb_root))} --profile {profile}[/bold cyan]\n"
+        f"[bold cyan]rbconvert convert {escape(str(usb_root))} --profile {profile}{bridge_flag}[/bold cyan]\n"
     )
 
 
@@ -217,6 +239,14 @@ def scan(path: Optional[str], profile: str, target_format: str):
     default=False,
     help="Safely unmount/eject the USB drive after conversion completes.",
 )
+@click.option(
+    "--experimental-onelibrary-bridge",
+    is_flag=True,
+    help=(
+        "Patch Device Library while retaining originals and backups, then rebuild OneLibrary "
+        "from Device Library in Rekordbox."
+    ),
+)
 def convert(
     path: Optional[str],
     profile: str,
@@ -227,6 +257,7 @@ def convert(
     no_backup: bool,
     clean_dotfiles: bool,
     eject: bool,
+    experimental_onelibrary_bridge: bool,
 ):
     """Converts incompatible tracks on the USB and updates databases & waveforms."""
     usb_root = resolve_usb_path(path)
@@ -244,17 +275,24 @@ def convert(
         usb_root=usb_root,
         profile=hw_profile,
         forced_target_format=TargetFormat(target_format.lower()),
+        allow_onelibrary_bridge=experimental_onelibrary_bridge,
     )
 
     if not summary.has_export_pdb:
         if summary.has_dlp:
-            raise click.ClickException(
-                "This is a Device Library Plus-only export. Safe exportLibrary.db support is not implemented."
-            )
+            raise click.ClickException(summary.unsupported_reason)
         raise click.ClickException("No PIONEER/rekordbox/export.pdb found on this drive.")
 
-    if summary.has_dlp:
-        raise click.ClickException(summary.unsupported_reason or "Device Library Plus is unsupported.")
+    if summary.has_dlp and not summary.onelibrary_bridge_mode:
+        raise click.ClickException(summary.unsupported_reason or "OneLibrary is unsupported.")
+
+    if summary.onelibrary_bridge_mode:
+        if no_backup:
+            raise click.ClickException(
+                "--no-backup cannot be used with --experimental-onelibrary-bridge."
+            )
+        keep_originals = True
+        no_backup = False
 
     if summary.incompatible_tracks == 0:
         console.print("\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n")
@@ -270,13 +308,31 @@ def convert(
             f"[bold]Delete Originals After Durable Commit:[/bold] {'Yes' if not keep_originals else 'No (Keep originals)'}\n"
             f"[bold]Clean macOS Ghost Files (._*):[/bold] {'Yes' if clean_dotfiles else 'No'}\n"
             f"[bold]Create Database Backups:[/bold] {'Yes (.bak)' if not no_backup else 'No'}",
-            title="Conversion Confirmation",
+            title=(
+                "Experimental OneLibrary Bridge"
+                if summary.onelibrary_bridge_mode
+                else "Conversion Confirmation"
+            ),
             border_style="yellow",
         )
     )
 
+    if summary.onelibrary_bridge_mode:
+        console.print(
+            Panel(
+                "This will patch only Device Library. Original audio and database backups are "
+                "required and will be retained. Afterward, Rekordbox must overwrite OneLibrary "
+                "using OneLibrary > Convert from Device Library. OneLibrary-only playlists or "
+                "histories may be lost. Test only on a fully copied USB.",
+                border_style="yellow",
+            )
+        )
+
     if not yes:
-        confirm = click.confirm("Do you want to proceed with conversion?", default=True)
+        confirm = click.confirm(
+            "Do you want to proceed with conversion?",
+            default=not summary.onelibrary_bridge_mode,
+        )
         if not confirm:
             console.print("[yellow]Conversion canceled by user.[/yellow]")
             return
@@ -306,6 +362,7 @@ def convert(
             threads=threads,
             clean_dotfiles=clean_dotfiles,
             progress_callback=on_progress,
+            allow_onelibrary_bridge=summary.onelibrary_bridge_mode,
         )
 
     if result.get("success"):
@@ -327,6 +384,14 @@ def convert(
                 border_style="green",
             )
         )
+        if result.get("onelibrary_sync_required"):
+            console.print(
+                Panel(
+                    escape(ONELIBRARY_REBUILD_REQUIRED_MESSAGE),
+                    title="Required Rekordbox Step",
+                    border_style="yellow",
+                )
+            )
     else:
         error_detail = escape(str(result.get("error") or "One or more tracks failed."))
         preflight = result.get("preflight_errors") or []
@@ -362,7 +427,17 @@ def restore(path: Optional[str]):
     usb_root = resolve_usb_path(path)
     engine = ConversionEngine()
 
-    confirm = click.confirm(f"Are you sure you want to restore {usb_root} database from .bak backup?", default=False)
+    dlp_paths = (
+        usb_root / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
+        usb_root / "PIONEER" / "rekordbox" / "exportLibrary.db",
+    )
+    restore_warning = f"Restore {usb_root} Device Library and ANLZ files from .bak backup?"
+    if any(path.is_file() for path in dlp_paths):
+        restore_warning += (
+            "\n\nOneLibrary will not be restored. If it has already been rebuilt, you must "
+            "run OneLibrary > Convert from Device Library in Rekordbox again after this restore."
+        )
+    confirm = click.confirm(restore_warning, default=False)
     if not confirm:
         console.print("[yellow]Restore canceled.[/yellow]")
         return

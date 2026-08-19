@@ -24,7 +24,7 @@ Manual conversion breaks the paths stored in Rekordbox's exported database and a
 - Detects missing, malformed, or mismatched ANLZ paths.
 - Removes AppleDouble (`._*`) and `.DS_Store` files when enabled.
 - Checks fresh free-space availability for worst-case parallel staging and backups.
-- Refuses collisions, paths outside the selected USB, missing sidecars, and unsupported Device Library Plus exports before conversion starts.
+- Refuses collisions, paths outside the selected USB, missing sidecars, and unsupported OneLibrary exports before conversion starts.
 
 ## Compatibility profiles
 
@@ -106,6 +106,8 @@ uv run rbconvert profiles
 
 Database and ANLZ backups are created by default. Restoration is deliberately refused if the backup's referenced original audio files are missing or have changed, because restoring metadata alone would create broken track references.
 
+Restoration does not restore OneLibrary. If OneLibrary has already been rebuilt from a converted Device Library, run **Convert from Device Library** in Rekordbox again after restoring so the two databases do not remain inconsistent.
+
 Restoration is therefore useful when originals were retained:
 
 ```bash
@@ -122,11 +124,29 @@ uv run rbconvert-gui
 
 The GUI supports dark, light, and system appearance modes, drive detection, profile descriptions, conversion controls, a track table, and progress reporting.
 
-## Device Library Plus limitation
+## OneLibrary limitation
 
-`exportLibrary.db` is an encrypted Device Library Plus database with different synchronization requirements. This release detects it but does not modify it. If Device Library Plus is present, conversion fails before audio or database files are changed.
+`exportLibrary.db` is the OneLibrary database, previously called Device Library Plus. It has different synchronization requirements from the traditional DeviceSQL `export.pdb`. This release detects it but does not modify it. By default, OneLibrary causes conversion to stop before audio or database files are changed; the explicit experimental bridge described below updates only Device Library and requires a subsequent Rekordbox rebuild.
 
-Re-export the USB using a supported DeviceSQL `export.pdb` workflow before using the converter. The application does not claim Device Library Plus synchronization until that implementation can be tested against real exports.
+Current Rekordbox versions normally maintain OneLibrary and Device Library side by side. This means simply re-exporting may create OneLibrary again. If the converter changed only `export.pdb`, OneLibrary would retain the old audio paths and equipment that reads OneLibrary could show missing tracks. Do not manually delete `exportLibrary.db` from a working USB: newer OneLibrary-only equipment does not reliably fall back to the traditional database. See AlphaTheta's [OneLibrary-compatible USB export guide](https://cdn.rekordbox.com/files/20260318114024/OneLibrary-Compatible-USB-Device-Export_en.pdf) for the current device split and export workflow.
+
+### Experimental OneLibrary bridge
+
+AlphaTheta documents a **Convert from Device Library** command that overwrites OneLibrary with the traditional Device Library's content. The converter can use that as an explicitly experimental bridge; it still does not parse or modify `exportLibrary.db` itself.
+
+Test this only on a complete copy of a USB:
+
+1. Scan the USB in the GUI and accept **Two-Step Rekordbox Update Required**, or add `--experimental-onelibrary-bridge` to the CLI command.
+2. Click **Convert Tracks (Step 1 of 2)**. Bridge mode requires database backups and always retains every original audio file.
+3. Open the USB in the latest Rekordbox. Do not export or synchronize other content first.
+4. Under **Devices**, right-click **OneLibrary** and choose **Convert from Device Library**. In Rekordbox 6, the menu is named **Device Library Plus**. Accept the overwrite warnings.
+5. Inspect the USB's OneLibrary view and verify the converted tracks before using the USB on equipment.
+
+```bash
+uv run rbconvert convert /Volumes/YOUR_USB --experimental-onelibrary-bridge
+```
+
+The Rekordbox command overwrites the existing OneLibrary. AlphaTheta warns that playlists or playback histories stored only in OneLibrary will be lost. The originals are deliberately left on the USB so the existing OneLibrary links remain valid until the rebuild succeeds. Remove those originals only after independently verifying the rebuilt OneLibrary; automated cleanup is not implemented yet.
 
 ## Development and tests
 

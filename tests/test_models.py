@@ -30,3 +30,4 @@ def test_scan_summary():
     assert summary.compatible_tracks == 0
     assert summary.incompatible_tracks == 0
     assert summary.has_export_pdb is False
+    assert summary.onelibrary_bridge_mode is False

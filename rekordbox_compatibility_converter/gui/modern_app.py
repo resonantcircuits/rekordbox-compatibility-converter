@@ -9,6 +9,11 @@ import customtkinter as ctk
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
+from ..core.dlp_manager import (
+    ONELIBRARY_BRIDGE_CONFIRM_MESSAGE,
+    ONELIBRARY_BRIDGE_PROMPT,
+    ONELIBRARY_REBUILD_REQUIRED_MESSAGE,
+)
 from ..core.engine import ConversionEngine
 from ..core.models import CompatibilityProfileType, ScanSummary, TargetFormat
 from ..core.usb_detector import USBDetector
@@ -430,6 +435,11 @@ class ModernRekordboxGUI(ctk.CTk):
             self.backup_switch,
         ):
             widget.configure(state=state)
+        if enabled and self.summary and self.summary.onelibrary_bridge_mode:
+            self.del_switch.deselect()
+            self.del_switch.configure(state="disabled")
+            self.backup_switch.select()
+            self.backup_switch.configure(state="disabled")
 
     def _refresh_drives(self):
         detected = USBDetector.list_rekordbox_drives()
@@ -466,13 +476,18 @@ class ModernRekordboxGUI(ctk.CTk):
         self.is_scanning = False
         self.summary = None
         self.btn_scan.configure(state="normal")
-        self.btn_convert.configure(state="disabled")
+        self.btn_convert.configure(
+            state="disabled",
+            text="Convert Incompatible Tracks",
+        )
         self.card_total.val_label.configure(text="--")
         self.card_compat.val_label.configure(text="--")
         self.card_incompat.val_label.configure(text="--")
         self.tree.delete(*self.tree.get_children())
         self.lbl_track_count.configure(text="")
         self.lbl_status.configure(text="Ready to scan.")
+        self.del_switch.configure(state="normal")
+        self.backup_switch.configure(state="normal")
 
     def _get_selected_path(self) -> Path:
         selected = self.drive_menu.get()
@@ -482,7 +497,7 @@ class ModernRekordboxGUI(ctk.CTk):
 
     # ------------------------------------------------------------------ scan
 
-    def _start_scan(self):
+    def _start_scan(self, allow_onelibrary_bridge: bool = False):
         usb_path = self._get_selected_path()
         if not usb_path.exists():
             messagebox.showerror("Error", f"Path does not exist: {usb_path}")
@@ -496,7 +511,14 @@ class ModernRekordboxGUI(ctk.CTk):
         self.lbl_status.configure(text="Scanning database...")
         self.tree.delete(*self.tree.get_children())
         self.btn_scan.configure(state="disabled")
-        self.btn_convert.configure(state="disabled")
+        self.btn_convert.configure(
+            state="disabled",
+            text=(
+                "Convert Tracks (Step 1 of 2)"
+                if allow_onelibrary_bridge
+                else "Convert Incompatible Tracks"
+            ),
+        )
 
         def run():
             try:
@@ -505,6 +527,7 @@ class ModernRekordboxGUI(ctk.CTk):
                     usb_root=usb_path,
                     profile=hw_profile,
                     forced_target_format=target_fmt,
+                    allow_onelibrary_bridge=allow_onelibrary_bridge,
                 )
             except Exception as e:
                 msg = str(e)
@@ -536,13 +559,26 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_scan.configure(state="normal")
         if not self.summary:
             return
-        if self.summary.has_dlp:
-            messagebox.showerror(
-                "Unsupported Export",
-                self.summary.unsupported_reason or "Device Library Plus cannot be synchronized safely.",
+        if self.summary.has_dlp and not self.summary.onelibrary_bridge_mode:
+            if not self.summary.has_export_pdb:
+                messagebox.showerror(
+                    "OneLibrary-only Export",
+                    self.summary.unsupported_reason
+                    or "This USB has no traditional Device Library to convert.",
+                )
+                self.lbl_status.configure(text="No files changed: Device Library is missing.")
+                self.btn_convert.configure(state="disabled")
+                return
+            proceed = messagebox.askyesno(
+                "Two-Step Rekordbox Update Required",
+                ONELIBRARY_BRIDGE_PROMPT,
+                default=messagebox.NO,
             )
-            self.lbl_status.configure(text="Conversion disabled: Device Library Plus is present.")
             self.btn_convert.configure(state="disabled")
+            if proceed:
+                self._start_scan(allow_onelibrary_bridge=True)
+            else:
+                self.lbl_status.configure(text="No files changed: experimental bridge declined.")
             return
         if not self.summary.has_export_pdb:
             messagebox.showerror(
@@ -572,7 +608,28 @@ class ModernRekordboxGUI(ctk.CTk):
         self.card_incompat.val_label.configure(text=str(incompat))
         self.lbl_track_count.configure(text=f"{incompat} of {total} tracks")
 
-        self.lbl_status.configure(text=f"Scan complete: {incompat} tracks require conversion to {self.format_var.get().upper()}.")
+        if self.summary.onelibrary_bridge_mode:
+            self.del_switch.deselect()
+            self.del_switch.configure(state="disabled")
+            self.backup_switch.select()
+            self.backup_switch.configure(state="disabled")
+            self.btn_convert.configure(text="Convert Tracks (Step 1 of 2)")
+            self.lbl_status.configure(
+                text=(
+                    f"Step 1 of 2 ready: {incompat} tracks need conversion. "
+                    "You will finish Step 2 in Rekordbox."
+                )
+            )
+        else:
+            self.del_switch.configure(state="normal")
+            self.backup_switch.configure(state="normal")
+            self.btn_convert.configure(text="Convert Incompatible Tracks")
+            self.lbl_status.configure(
+                text=(
+                    f"Scan complete: {incompat} tracks require conversion to "
+                    f"{self.format_var.get().upper()}."
+                )
+            )
 
         if incompat > 0:
             self.btn_convert.configure(state="normal")
@@ -593,14 +650,25 @@ class ModernRekordboxGUI(ctk.CTk):
 
         threads = int(self.threads_slider.get())
         conversion_summary = self.summary
-        delete_original = self.del_switch.get() == 1
-        create_backup = self.backup_switch.get() == 1
+        bridge_mode = conversion_summary.onelibrary_bridge_mode
+        delete_original = False if bridge_mode else self.del_switch.get() == 1
+        create_backup = True if bridge_mode else self.backup_switch.get() == 1
         clean_dotfiles = self.dotfiles_switch.get() == 1
-        confirm = messagebox.askyesno(
-            "Confirm Conversion",
-            f"Convert {len(self.summary.tasks)} tracks in parallel ({threads} threads) to {self.format_var.get().upper()}?\n\n"
-            f"export.pdb and ANLZ waveforms will be synchronized automatically.",
-        )
+        if bridge_mode:
+            confirm = messagebox.askyesno(
+                "Start Step 1 of 2",
+                f"{len(self.summary.tasks)} tracks will be converted to "
+                f"{self.format_var.get().upper()} using {threads} threads.\n\n"
+                f"{ONELIBRARY_BRIDGE_CONFIRM_MESSAGE}",
+                default=messagebox.NO,
+            )
+        else:
+            confirm = messagebox.askyesno(
+                "Confirm Conversion",
+                f"Convert {len(self.summary.tasks)} tracks in parallel ({threads} threads) to "
+                f"{self.format_var.get().upper()}?\n\n"
+                "export.pdb and ANLZ waveforms will be synchronized automatically.",
+            )
         if not confirm:
             return
 
@@ -625,6 +693,7 @@ class ModernRekordboxGUI(ctk.CTk):
                     threads=threads,
                     clean_dotfiles=clean_dotfiles,
                     progress_callback=on_prog,
+                    allow_onelibrary_bridge=bridge_mode,
                 )
             except Exception as e:
                 msg = str(e)
@@ -659,6 +728,23 @@ class ModernRekordboxGUI(ctk.CTk):
         self.progress_bar.set(1.0)
 
         if result.get("success"):
+            if result.get("onelibrary_sync_required"):
+                self.lbl_status.configure(
+                    text="Step 1 of 2 complete. Complete Step 2 in Rekordbox before using this USB."
+                )
+                messagebox.showwarning(
+                    "Step 1 Complete — Finish in Rekordbox",
+                    f"Converted {result['completed']} tracks.\n\n"
+                    f"{ONELIBRARY_REBUILD_REQUIRED_MESSAGE}",
+                )
+                self.summary = None
+                self.btn_convert.configure(
+                    state="disabled",
+                    text="Finish Step 2 in Rekordbox",
+                )
+                self.del_switch.configure(state="normal")
+                self.backup_switch.configure(state="normal")
+                return
             self.lbl_status.configure(text=f"Conversion complete: {result.get('completed', 0)} tracks converted.")
             cleaned = result.get("cleaned_dotfiles", 0)
             dot_msg = f"\n- Cleaned {cleaned} macOS ghost files" if cleaned else ""
@@ -681,14 +767,40 @@ class ModernRekordboxGUI(ctk.CTk):
             completed = result.get("completed", 0)
             failed = result.get("failed", 0)
             self.lbl_status.configure(text=f"Conversion finished with errors: {completed} converted, {failed} failed.")
-            errors = [t.error for t in conversion_summary.tasks if t.error]
-            if result.get("error"):
-                errors.insert(0, result["error"])
-            detail = f"\n\nFirst error:\n{errors[0]}" if errors else ""
+            errors = list(result.get("preflight_errors") or [])
+            errors.extend(t.error for t in conversion_summary.tasks if t.error)
+            unique_errors = list(dict.fromkeys(error for error in errors if error))
+            if unique_errors:
+                displayed_errors = "\n".join(
+                    f"- {error}" for error in unique_errors[:3]
+                )
+                remaining = len(unique_errors) - 3
+                if remaining > 0:
+                    displayed_errors += f"\n- {remaining} additional error types"
+                detail = f"\n\nWhy conversion stopped:\n{displayed_errors}"
+            elif result.get("error"):
+                detail = f"\n\nWhy conversion stopped:\n{result['error']}"
+            else:
+                detail = ""
             messagebox.showwarning(
                 "Completed with Errors",
-                f"Converted: {completed}\nFailed: {failed}{detail}",
+                f"Converted: {completed}\nFailed: {failed}{detail}"
+                + (
+                    "\n\nOneLibrary was not updated. Keep the original files and either restore "
+                    "the backup or resolve the failed tracks before rebuilding OneLibrary."
+                    if conversion_summary.onelibrary_bridge_mode and completed
+                    else ""
+                ),
             )
+        if conversion_summary.onelibrary_bridge_mode:
+            self.summary = None
+            self.btn_convert.configure(
+                state="disabled",
+                text="Scan Again Before Retrying",
+            )
+            self.del_switch.configure(state="normal")
+            self.backup_switch.configure(state="normal")
+            return
         self._start_scan()
 
     # ------------------------------------------------------------------ restore
@@ -697,7 +809,22 @@ class ModernRekordboxGUI(ctk.CTk):
         usb_path = self._get_selected_path()
         if not usb_path.exists():
             return
-        confirm = messagebox.askyesno("Confirm Restore", f"Restore {usb_path} from .bak backup?")
+        dlp_paths = (
+            usb_path / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
+            usb_path / "PIONEER" / "rekordbox" / "exportLibrary.db",
+        )
+        restore_message = f"Restore {usb_path} Device Library and ANLZ files from .bak backup?"
+        if any(path.is_file() for path in dlp_paths):
+            restore_message += (
+                "\n\nOneLibrary will not be restored. If it has already been rebuilt, you must "
+                "run OneLibrary > Convert from Device Library in Rekordbox again after this "
+                "restore."
+            )
+        confirm = messagebox.askyesno(
+            "Confirm Restore",
+            restore_message,
+            default=messagebox.NO,
+        )
         if not confirm:
             return
         success, msg = self.engine.restore_backup(usb_path)

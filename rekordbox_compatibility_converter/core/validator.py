@@ -6,6 +6,7 @@ from typing import Dict, List, Optional
 
 from .anlz_manager import ANLZManager
 from .audio_converter import AudioConverter
+from .dlp_manager import ONELIBRARY_PRESENT_MESSAGE
 from .pdb_manager import PDBManager
 from .profiles import HardwareProfile
 
@@ -100,7 +101,7 @@ class ExportValidator:
                     0,
                     "",
                     "ERROR",
-                    "Device Library Plus is present but cannot be validated or synchronized safely.",
+                    ONELIBRARY_PRESENT_MESSAGE,
                 )
             )
 

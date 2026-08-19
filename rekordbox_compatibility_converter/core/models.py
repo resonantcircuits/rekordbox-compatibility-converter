@@ -84,6 +84,7 @@ class ScanSummary:
     has_export_pdb: bool = False
     has_export_ext_pdb: bool = False
     has_dlp: bool = False
+    onelibrary_bridge_mode: bool = False
     free_space_bytes: int = 0
     estimated_extra_bytes: int = 0
     unsupported_reason: Optional[str] = None

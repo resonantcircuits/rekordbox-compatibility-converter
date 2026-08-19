@@ -12,7 +12,12 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 from .anlz_manager import ANLZManager
 from .audio_converter import AudioConverter
-from .dlp_manager import DLPManager
+from .dlp_manager import (
+    DLPManager,
+    ONELIBRARY_ONLY_MESSAGE,
+    ONELIBRARY_PRESENT_MESSAGE,
+    ONELIBRARY_REBUILD_REQUIRED_MESSAGE,
+)
 from .models import (
     ConversionTask,
     ScanSummary,
@@ -85,6 +90,7 @@ class ConversionEngine:
         forced_target_format: Optional[TargetFormat] = None,
         forced_sample_rate: Optional[int] = None,
         forced_sample_depth: Optional[int] = None,
+        allow_onelibrary_bridge: bool = False,
     ) -> ScanSummary:
         """Scans a Rekordbox USB drive and builds an actionable conversion plan."""
         usb_root = Path(usb_root).resolve()
@@ -110,10 +116,12 @@ class ConversionEngine:
         if unsafe_pdb:
             summary.unsupported_reason = "export.pdb resolves outside the selected USB root."
         elif has_dlp:
-            summary.unsupported_reason = (
-                "Device Library Plus exportLibrary.db is present. Safe synchronization "
-                "is not implemented, so conversion is disabled for this export."
-            )
+            if not has_pdb:
+                summary.unsupported_reason = ONELIBRARY_ONLY_MESSAGE
+            elif allow_onelibrary_bridge:
+                summary.onelibrary_bridge_mode = True
+            else:
+                summary.unsupported_reason = ONELIBRARY_PRESENT_MESSAGE
 
         try:
             stat = shutil.disk_usage(usb_root)
@@ -121,7 +129,7 @@ class ConversionEngine:
         except Exception:
             summary.free_space_bytes = 0
 
-        if not has_pdb:
+        if not has_pdb or (has_dlp and not summary.onelibrary_bridge_mode):
             return summary
 
         pdb_manager = PDBManager(pdb_path)
@@ -156,12 +164,31 @@ class ConversionEngine:
                 if target_fmt == TargetFormat.MP3:
                     target_sd = 16
 
-                new_ext = target_fmt.value
                 filename_path = PurePosixPath(track.filename)
                 stem = filename_path.stem if filename_path.suffix else filename_path.name
-                new_filename = f"{stem}.{new_ext}"
                 file_path = PurePosixPath(track.file_path)
+
+                # `.aif` and `.aiff` contain the same AIFF data. Prefer the
+                # familiar `.aiff`, but fall back to `.aif` when the DeviceSQL
+                # row has only enough in-place string space for a 3-letter
+                # extension (for example, `.wav` or `.m4a` -> `.aif`).
+                target_extensions = [target_fmt.value]
+                if target_fmt == TargetFormat.AIFF:
+                    target_extensions.append("aif")
+
+                new_filename = f"{stem}.{target_extensions[0]}"
                 new_usb_path = str(file_path.parent / new_filename)
+                for candidate_ext in target_extensions:
+                    candidate_filename = f"{stem}.{candidate_ext}"
+                    candidate_usb_path = str(file_path.parent / candidate_filename)
+                    if pdb_manager.can_fit_strings(
+                        track,
+                        candidate_filename,
+                        candidate_usb_path,
+                    ):
+                        new_filename = candidate_filename
+                        new_usb_path = candidate_usb_path
+                        break
 
                 target_abs = usb_root / new_usb_path.lstrip("/")
 
@@ -351,6 +378,7 @@ class ConversionEngine:
         threads: int = 4,
         clean_dotfiles: bool = True,
         progress_callback: Optional[Callable[[ConversionTask, int, int], None]] = None,
+        allow_onelibrary_bridge: bool = False,
     ) -> dict:
         """Executes staged conversions and commits each track before deleting its source."""
         pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
@@ -359,7 +387,9 @@ class ConversionEngine:
         if not self._is_within(summary.usb_root, pdb_path):
             return {"success": False, "error": "export.pdb resolves outside the selected USB root."}
 
-        if summary.has_dlp:
+        if summary.has_dlp and not (
+            allow_onelibrary_bridge and summary.onelibrary_bridge_mode
+        ):
             dlp_paths = [
                 summary.usb_root / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
                 summary.usb_root / "PIONEER" / "rekordbox" / "exportLibrary.db",
@@ -373,6 +403,27 @@ class ConversionEngine:
                 "completed": 0,
                 "failed": len(summary.tasks),
             }
+
+        if summary.onelibrary_bridge_mode:
+            if delete_original:
+                return {
+                    "success": False,
+                    "error": (
+                        "The experimental OneLibrary bridge requires retaining all original "
+                        "audio files until Rekordbox has rebuilt and verified OneLibrary."
+                    ),
+                    "total": len(summary.tasks),
+                    "completed": 0,
+                    "failed": len(summary.tasks),
+                }
+            if not backup:
+                return {
+                    "success": False,
+                    "error": "The experimental OneLibrary bridge requires database backups.",
+                    "total": len(summary.tasks),
+                    "completed": 0,
+                    "failed": len(summary.tasks),
+                }
 
         try:
             pdb_manager = PDBManager(pdb_path)
@@ -759,6 +810,9 @@ class ConversionEngine:
         if clean_dotfiles:
             cleaned_files = self.clean_dotfiles(summary.usb_root)
 
+        if summary.onelibrary_bridge_mode and completed:
+            warnings.insert(0, ONELIBRARY_REBUILD_REQUIRED_MESSAGE)
+
         return {
             "success": failed == 0,
             "total": total_tasks,
@@ -767,4 +821,7 @@ class ConversionEngine:
             "anlz_updated": anlz_updated,
             "cleaned_dotfiles": cleaned_files,
             "warnings": warnings,
+            "onelibrary_sync_required": bool(
+                summary.onelibrary_bridge_mode and completed
+            ),
         }

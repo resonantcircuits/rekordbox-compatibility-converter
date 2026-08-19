@@ -164,8 +164,131 @@ def test_engine_refuses_device_library_plus(mock_usb: Path):
     result = engine.execute(summary, clean_dotfiles=False)
 
     assert result["success"] is False
-    assert "not implemented" in result["error"]
+    assert "old audio paths" in result["error"]
+    assert "No files were changed" in result["error"]
+    assert summary.tasks == []
     assert (mock_usb / "Contents" / "song.flac").exists()
+
+
+def test_experimental_onelibrary_bridge_retains_originals_and_database(mock_usb: Path):
+    dlp = mock_usb / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db"
+    dlp.parent.mkdir(parents=True)
+    original_dlp = b"encrypted OneLibrary database"
+    dlp.write_bytes(original_dlp)
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb, allow_onelibrary_bridge=True)
+
+    assert summary.onelibrary_bridge_mode is True
+    assert summary.unsupported_reason is None
+    assert len(summary.tasks) == 1
+
+    unauthorized_result = engine.execute(
+        summary,
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+    )
+    assert unauthorized_result["success"] is False
+    assert "old audio paths" in unauthorized_result["error"]
+
+    unsafe_result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        allow_onelibrary_bridge=True,
+    )
+    assert unsafe_result["success"] is False
+    assert "retaining all original" in unsafe_result["error"]
+
+    no_backup_result = engine.execute(
+        summary,
+        delete_original=False,
+        backup=False,
+        clean_dotfiles=False,
+        allow_onelibrary_bridge=True,
+    )
+    assert no_backup_result["success"] is False
+    assert "requires database backups" in no_backup_result["error"]
+
+    result = engine.execute(
+        summary,
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        allow_onelibrary_bridge=True,
+    )
+
+    assert result["success"] is True
+    assert result["onelibrary_sync_required"] is True
+    assert "STEP 1 OF 2 IS COMPLETE" in result["warnings"][0]
+    assert (mock_usb / "Contents" / "song.flac").exists()
+    assert (mock_usb / "Contents" / "song.aiff").exists()
+    assert dlp.read_bytes() == original_dlp
+    assert PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb").tracks[
+        0
+    ].file_path.endswith(".aiff")
+
+
+def test_scan_uses_short_aif_extension_when_aiff_does_not_fit(tmp_path: Path):
+    usb = tmp_path / "USB"
+    contents = usb / "Contents"
+    rekordbox = usb / "PIONEER" / "rekordbox"
+    anlz_dir = usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    dlp = usb / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db"
+    contents.mkdir(parents=True)
+    rekordbox.mkdir(parents=True)
+    anlz_dir.mkdir(parents=True)
+    dlp.parent.mkdir(parents=True)
+
+    source = contents / "song.wav"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.05",
+            "-ar", "44100", "-c:a", "pcm_s32le", str(source),
+        ],
+        check=True,
+    )
+    pdb = create_minimal_pdb(
+        rekordbox,
+        file_size=source.stat().st_size,
+        filename="song.wav",
+        filepath="/Contents/song.wav",
+        analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+    )
+    data = bytearray(pdb.read_bytes())
+    struct.pack_into("<H", data, 4096 + 0x28 + 0x52, 32)
+    pdb.write_bytes(data)
+    create_minimal_anlz(anlz_dir, "/Contents/song.wav")
+    dlp.write_bytes(b"unchanged OneLibrary")
+
+    engine = ConversionEngine()
+    summary = engine.scan(
+        usb,
+        profile=get_profile(CompatibilityProfileType.MODERN),
+        forced_target_format=TargetFormat.AIFF,
+        allow_onelibrary_bridge=True,
+    )
+
+    assert len(summary.tasks) == 1
+    assert summary.tasks[0].target_filename == "song.aif"
+    assert summary.tasks[0].target_usb_path == "/Contents/song.aif"
+
+    result = engine.execute(
+        summary,
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        allow_onelibrary_bridge=True,
+    )
+
+    assert result["success"] is True
+    assert source.exists()
+    assert (contents / "song.aif").is_file()
+    assert dlp.read_bytes() == b"unchanged OneLibrary"
+    assert PDBManager(pdb).tracks[0].file_path == "/Contents/song.aif"
 
 
 def test_restore_succeeds_when_originals_were_retained(mock_usb: Path):
