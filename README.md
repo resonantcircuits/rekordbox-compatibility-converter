@@ -48,6 +48,18 @@ From an existing checkout:
 uv sync --extra dev
 ```
 
+### Desktop release downloads
+
+Version tags publish these unsigned desktop builds to the corresponding GitHub Release:
+
+- `macOS-arm64` for Apple Silicon Macs
+- `macOS-x86_64` for Intel Macs
+- `Windows-x86_64` for 64-bit Windows
+
+The release also includes `SHA256SUMS.txt` for download verification. The applications bundle Python and project dependencies, but FFmpeg and ffprobe must still be installed separately and available on `PATH`.
+
+The current builds are not code-signed or notarized. macOS Gatekeeper and Windows SmartScreen may therefore require the user to explicitly approve the first launch. Production signing requires Apple Developer and Windows code-signing credentials configured as repository secrets.
+
 ## CLI usage
 
 Scan an explicitly selected export:
@@ -124,6 +136,8 @@ uv run --extra dev pytest -v
 ```
 
 The CI matrix covers Python 3.9 through 3.14 and Linux, macOS, and Windows.
+
+Pushing a version tag that exactly matches the package version triggers the release build. For example, version `0.2.0` requires tag `v0.2.0`. The workflow tests the project first, builds all three desktop targets on their native operating systems, smoke-tests the packaged applications, and publishes one GitHub Release with generated notes and checksums.
 
 ## License
 

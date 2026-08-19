@@ -58,15 +58,27 @@ jobs:
         run: uv run --frozen --extra dev pytest -v
 
   build-executables:
-    name: Build Desktop App (${{ matrix.os }})
+    name: Build Desktop App (${{ matrix.asset_suffix }})
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
-    permissions:
-      contents: write
     strategy:
+      fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest]
+        include:
+          - os: macos-15
+            platform: macos
+            asset_suffix: macOS-arm64
+          - os: macos-15-intel
+            platform: macos
+            asset_suffix: macOS-x86_64
+          - os: windows-2025
+            platform: windows
+            asset_suffix: Windows-x86_64
+
+    env:
+      ASSET_BASENAME: RekordboxFormatChecker-${{ github.ref_name }}-${{ matrix.asset_suffix }}
+      RBCONVERT_SMOKE_TEST: "1"
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -83,35 +95,82 @@ jobs:
       - name: Smoke-test GUI entrypoint import
         run: uv run --frozen --extra dev python -c "from rekordbox_compatibility_converter.gui.app import main; assert callable(main)"
 
+      - name: Verify tag matches package version
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: uv run --frozen --extra dev python -c "import os, tomllib; version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; expected = 'v' + version; actual = os.environ['RELEASE_TAG']; assert actual == expected, 'tag %r does not match package version %s' % (actual, expected)"
+
       - name: Build macOS App
-        if: runner.os == 'macOS'
+        if: matrix.platform == 'macos'
         run: |
           uv run --frozen --extra dev pyinstaller --noconfirm --onedir --windowed --name "RekordboxFormatChecker" \
             --collect-all customtkinter \
             rekordbox_compatibility_converter/gui/app.py
-          cd dist && zip -r RekordboxFormatChecker-macOS.zip RekordboxFormatChecker.app
+
+      - name: Smoke-test macOS App
+        if: matrix.platform == 'macos'
+        run: dist/RekordboxFormatChecker.app/Contents/MacOS/RekordboxFormatChecker
+
+      - name: Package macOS App
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p release-assets
+          ditto -c -k --sequesterRsrc --keepParent dist/RekordboxFormatChecker.app "release-assets/${ASSET_BASENAME}.zip"
 
       - name: Build Windows Exe
-        if: runner.os == 'Windows'
+        if: matrix.platform == 'windows'
         run: |
           uv run --frozen --extra dev pyinstaller --noconfirm --onefile --windowed --name "RekordboxFormatChecker" `
             --collect-all customtkinter `
             rekordbox_compatibility_converter/gui/app.py
 
-      - name: Upload macOS Release Artifact
-        if: runner.os == 'macOS'
-        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
-        with:
-          files: dist/RekordboxFormatChecker-macOS.zip
-          fail_on_unmatched_files: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Smoke-test Windows Exe
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath "dist/RekordboxFormatChecker.exe" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Packaged application exited with code $($process.ExitCode)" }
 
-      - name: Upload Windows Release Artifact
-        if: runner.os == 'Windows'
+      - name: Package Windows Exe
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-assets
+          Copy-Item "dist/RekordboxFormatChecker.exe" "release-assets/$env:ASSET_BASENAME.exe"
+
+      - name: Upload packaged executable
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-${{ matrix.asset_suffix }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-executables
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download packaged executables
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA-256 checksums
+        working-directory: release-assets
+        run: sha256sum RekordboxFormatChecker-* > SHA256SUMS.txt
+
+      - name: Create GitHub Release
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          files: dist/RekordboxFormatChecker.exe
+          files: release-assets/*
           fail_on_unmatched_files: true
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
