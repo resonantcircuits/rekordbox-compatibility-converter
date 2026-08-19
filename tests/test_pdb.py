@@ -3,8 +3,8 @@
 import struct
 from pathlib import Path
 import pytest
-from rekordbox_format_checker.core.models import TrackInfo
-from rekordbox_format_checker.core.pdb_manager import PDBManager
+from rekordbox_compatibility_converter.core.models import TrackInfo
+from rekordbox_compatibility_converter.core.pdb_manager import PDBManager
 
 
 def create_minimal_pdb(tmp_path: Path, file_size: int = 50000000) -> Path:

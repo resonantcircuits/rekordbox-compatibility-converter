@@ -1,7 +1,7 @@
 [project]
-name = "rekordbox-format-checker"
+name = "rekordbox-compatibility-converter"
 version = "0.2.0"
-description = "A fast, cross-platform CLI and modern GUI utility to convert Rekordbox USB exports to CDJ-compatible audio formats with database and waveform synchronization."
+description = "A fast, cross-platform CLI and modern Dark-Mode GUI utility to convert Rekordbox USB exports to CDJ-compatible audio formats with database and waveform synchronization."
 readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
@@ -21,13 +21,14 @@ dev = [
 ]
 
 [project.scripts]
-rekordbox-format-checker = "rekordbox_format_checker.cli.main:cli"
-rbcheck = "rekordbox_format_checker.cli.main:cli"
-rbcheck-gui = "rekordbox_format_checker.gui.app:main"
+rekordbox-compatibility-converter = "rekordbox_compatibility_converter.cli.main:cli"
+rbconvert = "rekordbox_compatibility_converter.cli.main:cli"
+rb-compat = "rekordbox_compatibility_converter.cli.main:cli"
+rbconvert-gui = "rekordbox_compatibility_converter.gui.app:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["rekordbox_format_checker"]
+packages = ["rekordbox_compatibility_converter"]

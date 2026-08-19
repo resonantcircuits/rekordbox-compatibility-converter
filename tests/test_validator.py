@@ -1,7 +1,7 @@
 """Tests for ExportValidator."""
 
 from pathlib import Path
-from rekordbox_format_checker.core.validator import ExportValidator
+from rekordbox_compatibility_converter.core.validator import ExportValidator
 from tests.test_engine import mock_usb
 
 

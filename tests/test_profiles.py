@@ -1,11 +1,11 @@
 """Tests for compatibility profiles."""
 
-from rekordbox_format_checker.core.models import (
+from rekordbox_compatibility_converter.core.models import (
     CompatibilityProfileType,
     TargetFormat,
     TrackInfo,
 )
-from rekordbox_format_checker.core.profiles import get_profile
+from rekordbox_compatibility_converter.core.profiles import get_profile
 
 
 def test_standard_profile_flac():

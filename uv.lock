@@ -848,7 +848,7 @@ wheels = [
 ]
 
 [[package]]
-name = "rekordbox-format-checker"
+name = "rekordbox-compatibility-converter"
 version = "0.2.0"
 source = { editable = "." }
 dependencies = [

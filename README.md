@@ -48,8 +48,8 @@ This tool points directly at an **already-exported Rekordbox USB drive** and:
 
 ### Using `uv` (Recommended)
 ```bash
-git clone https://github.com/your-username/rekordbox-format-checker.git
-cd rekordbox-format-checker
+git clone https://github.com/your-username/rekordbox-compatibility-converter.git
+cd rekordbox-compatibility-converter
 uv venv
 uv pip install -e ".[dev]"
 ```
@@ -67,7 +67,7 @@ pip install -e .
 
 Launch the visual application:
 ```bash
-rbcheck-gui
+rbconvert-gui
 ```
 - Select your USB drive from the auto-populated dropdown.
 - Choose your desired CDJ profile and target format.
@@ -81,43 +81,43 @@ rbcheck-gui
 
 #### Auto-Detect & Scan USB Drive (Dry Run)
 ```bash
-rbcheck scan
+rbconvert scan
 # Or specify mount path explicitly:
-rbcheck scan /Volumes/YOUR_USB
+rbconvert scan /Volumes/YOUR_USB
 ```
 
 #### Convert Incompatible Tracks (Multi-Threaded)
 ```bash
 # Interactive conversion with confirmation prompt
-rbcheck convert /Volumes/YOUR_USB
+rbconvert convert /Volumes/YOUR_USB
 
 # Non-interactive immediate conversion with 8 parallel worker threads
-rbcheck convert /Volumes/YOUR_USB -y --threads 8
+rbconvert convert /Volumes/YOUR_USB -y --threads 8
 
 # Specify target profile (e.g. legacy CDJ-350/850)
-rbcheck convert /Volumes/YOUR_USB --profile maximum -y
+rbconvert convert /Volumes/YOUR_USB --profile maximum -y
 
 # Convert to 320kbps MP3 or WAV instead of AIFF
-rbcheck convert /Volumes/YOUR_USB --format mp3 -y
+rbconvert convert /Volumes/YOUR_USB --format mp3 -y
 
 # Safely eject USB after conversion
-rbcheck convert /Volumes/YOUR_USB -y --eject
+rbconvert convert /Volumes/YOUR_USB -y --eject
 ```
 
 #### Verify Database & Waveform Integrity
 ```bash
-rbcheck verify /Volumes/YOUR_USB
+rbconvert verify /Volumes/YOUR_USB
 ```
 
 #### Restore from Backup (.bak)
 ```bash
-rbcheck restore /Volumes/YOUR_USB
+rbconvert restore /Volumes/YOUR_USB
 ```
 
 #### List Detected Drives & Profiles
 ```bash
-rbcheck drives
-rbcheck profiles
+rbconvert drives
+rbconvert profiles
 ```
 
 ---

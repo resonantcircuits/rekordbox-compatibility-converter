@@ -32,7 +32,7 @@ def resolve_usb_path(path_arg: Optional[str]) -> Path:
     if not detected:
         console.print("[yellow]No Rekordbox USB drives automatically detected.[/yellow]")
         console.print("Please specify the path to your USB drive, e.g.:")
-        console.print("  [cyan]rbcheck scan /Volumes/YOUR_USB[/cyan]")
+        console.print("  [cyan]rbconvert scan /Volumes/YOUR_USB[/cyan]")
         raise click.Abort()
 
     if len(detected) == 1:
@@ -140,7 +140,7 @@ def scan(path: Optional[str], profile: str, target_format: str):
         console.print(f"[dim]... and {len(summary.tasks) - 10} more tracks.[/dim]\n")
 
     console.print(
-        f"[yellow]To convert these tracks, run:[/yellow] [bold cyan]rbcheck convert {usb_root} --profile {profile}[/bold cyan]\n"
+        f"[yellow]To convert these tracks, run:[/yellow] [bold cyan]rbconvert convert {usb_root} --profile {profile}[/bold cyan]\n"
     )
 
 

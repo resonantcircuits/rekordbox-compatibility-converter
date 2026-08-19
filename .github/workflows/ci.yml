@@ -78,7 +78,7 @@ jobs:
         run: |
           uv run pyinstaller --noconfirm --onedir --windowed --name "RekordboxFormatChecker" \
             --collect-all customtkinter \
-            rekordbox_format_checker/gui/app.py
+            rekordbox_compatibility_converter/gui/app.py
           cd dist && zip -r RekordboxFormatChecker-macOS.zip RekordboxFormatChecker.app
 
       - name: Build Windows Exe
@@ -86,7 +86,7 @@ jobs:
         run: |
           uv run pyinstaller --noconfirm --onefile --windowed --name "RekordboxFormatChecker" `
             --collect-all customtkinter `
-            rekordbox_format_checker/gui/app.py
+            rekordbox_compatibility_converter/gui/app.py
 
       - name: Upload Release Artifacts
         uses: softprops/action-gh-release@v2

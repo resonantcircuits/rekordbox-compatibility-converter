@@ -2,7 +2,7 @@
 
 import struct
 from pathlib import Path
-from rekordbox_format_checker.core.anlz_manager import ANLZManager
+from rekordbox_compatibility_converter.core.anlz_manager import ANLZManager
 
 
 def create_minimal_anlz(tmp_path: Path, audio_path: str) -> Path:

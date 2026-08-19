@@ -1,7 +1,7 @@
 """Tests for data models."""
 
 from pathlib import Path
-from rekordbox_format_checker.core.models import (
+from rekordbox_compatibility_converter.core.models import (
     TrackInfo,
     TargetFormat,
     CompatibilityProfileType,

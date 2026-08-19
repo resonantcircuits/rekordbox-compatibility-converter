@@ -3,8 +3,8 @@
 import subprocess
 from pathlib import Path
 import pytest
-from rekordbox_format_checker.core.audio_converter import AudioConverter
-from rekordbox_format_checker.core.models import TargetFormat
+from rekordbox_compatibility_converter.core.audio_converter import AudioConverter
+from rekordbox_compatibility_converter.core.models import TargetFormat
 
 
 @pytest.fixture

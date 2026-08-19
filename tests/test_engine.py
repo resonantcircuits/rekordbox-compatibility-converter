@@ -3,9 +3,9 @@
 import subprocess
 from pathlib import Path
 import pytest
-from rekordbox_format_checker.core.engine import ConversionEngine
-from rekordbox_format_checker.core.models import CompatibilityProfileType, TargetFormat
-from rekordbox_format_checker.core.profiles import get_profile
+from rekordbox_compatibility_converter.core.engine import ConversionEngine
+from rekordbox_compatibility_converter.core.models import CompatibilityProfileType, TargetFormat
+from rekordbox_compatibility_converter.core.profiles import get_profile
 from tests.test_pdb import create_minimal_pdb
 from tests.test_anlz import create_minimal_anlz
 
