@@ -3,8 +3,9 @@
 import os
 import shutil
 import struct
+import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Tuple
 
 from .models import TrackInfo
 
@@ -34,6 +35,12 @@ class PDBManager:
         self.len_page, self.num_tables, next_u, self.seq_db = struct.unpack_from(
             "<IIII", self.data, 4
         )
+        if self.len_page != 4096:
+            raise ValueError(f"Unsupported DeviceSQL page size: {self.len_page} bytes.")
+        if len(self.data) % self.len_page != 0:
+            raise ValueError("PDB file length is not aligned to its page size.")
+        if 0x1C + (self.num_tables * 16) > self.len_page:
+            raise ValueError("PDB table directory extends beyond the header page.")
 
         self.tables = []
         offset = 0x1C
@@ -65,18 +72,26 @@ class PDBManager:
         if ofs == 0:
             return "", 0, 0
         str_pos = row_base + ofs
-        if str_pos >= len(page_data):
+        if str_pos < row_base + 0x88 or str_pos >= len(page_data):
             return "", 0, 0
 
         kind = page_data[str_pos]
         if kind == 0x40:
             # Long ASCII: [0x40, len_u2, type_u1, ...ascii]
+            if str_pos + 4 > len(page_data):
+                return "", 0, 0
             length = struct.unpack_from("<H", page_data, str_pos + 1)[0]
+            if length < 4 or str_pos + length > len(page_data):
+                return "", 0, 0
             text_bytes = page_data[str_pos + 4 : str_pos + length]
             return text_bytes.decode("ascii", errors="replace").rstrip("\x00"), str_pos, length
         elif kind == 0x90:
             # Long UTF-16LE: [0x90, len_u2, type_u1, ...utf16]
+            if str_pos + 4 > len(page_data):
+                return "", 0, 0
             length = struct.unpack_from("<H", page_data, str_pos + 1)[0]
+            if length < 4 or (length - 4) % 2 or str_pos + length > len(page_data):
+                return "", 0, 0
             text_bytes = page_data[str_pos + 4 : str_pos + length]
             return (
                 text_bytes.decode("utf-16le", errors="replace").rstrip("\x00"),
@@ -85,9 +100,13 @@ class PDBManager:
             )
         else:
             # Short ASCII: [(len << 1) | 1, ...ascii]
+            if (kind & 1) == 0:
+                return "", 0, 0
             length = kind >> 1
             if length <= 1:
                 return "", str_pos, 1
+            if str_pos + length > len(page_data):
+                return "", 0, 0
             text_bytes = page_data[str_pos + 1 : str_pos + length]
             return (
                 text_bytes.decode("ascii", errors="replace").rstrip("\x00"),
@@ -95,9 +114,19 @@ class PDBManager:
                 length,
             )
 
-    def _encode_dsql_string(self, text: str) -> bytearray:
+    def _encode_dsql_string(self, text: str, prefer_utf16: bool = False) -> bytearray:
         """Encodes a string into DeviceSQL binary format."""
-        raw = text.encode("ascii", errors="replace")
+        try:
+            raw = text.encode("ascii")
+        except UnicodeEncodeError:
+            prefer_utf16 = True
+
+        if prefer_utf16:
+            raw_utf16 = text.encode("utf-16le")
+            total_len = len(raw_utf16) + 4
+            header = struct.pack("<BHB", 0x90, total_len, 0x03)
+            return bytearray(header) + bytearray(raw_utf16)
+
         if len(raw) < 127:
             # Short ASCII: byte 0 is (len + 1) * 2 + 1
             total_len = len(raw) + 1
@@ -111,18 +140,35 @@ class PDBManager:
 
     def _string_alloc_size(self, abs_pos: int) -> int:
         """Returns the total encoded byte length of the existing string at abs_pos."""
+        if abs_pos < 0 or abs_pos >= len(self.data):
+            return 0
         kind = self.data[abs_pos]
         if kind in (0x40, 0x90):
+            if abs_pos + 3 > len(self.data):
+                return 0
             return struct.unpack_from("<H", self.data, abs_pos + 1)[0]
-        return kind >> 1
+        return (kind >> 1) if (kind & 1) else 0
 
     def can_fit_strings(self, track: TrackInfo, new_filename: str, new_filepath: str) -> bool:
         """Checks whether both replacement strings fit inside the existing heap allocations."""
+        if len(track.ofs_strings) <= 20 or track.page_idx < 0:
+            return False
+        page_start = track.page_idx * self.len_page
+        page_end = page_start + self.len_page
         row_base = track.page_idx * self.len_page + track.row_offset
+        if row_base < page_start + 0x28 or row_base + 0x88 > min(page_end, len(self.data)):
+            return False
         for ofs, text in ((track.ofs_strings[19], new_filename), (track.ofs_strings[20], new_filepath)):
             if ofs == 0:
-                continue
-            if len(self._encode_dsql_string(text)) > self._string_alloc_size(row_base + ofs):
+                return False
+            pos = row_base + ofs
+            if pos < row_base + 0x88 or pos >= page_end:
+                return False
+            prefer_utf16 = self.data[pos] == 0x90
+            allocation = self._string_alloc_size(pos)
+            if allocation <= 0 or pos + allocation > page_end:
+                return False
+            if len(self._encode_dsql_string(text, prefer_utf16)) > allocation:
                 return False
         return True
 
@@ -134,6 +180,8 @@ class PDBManager:
 
         tracks: List[TrackInfo] = []
         current_page_idx = track_table["first_page"]
+        if current_page_idx == 0:
+            return []
         visited = set()
 
         while current_page_idx * self.len_page < len(self.data):
@@ -149,30 +197,42 @@ class PDBManager:
             gap, page_idx, p_type, next_page, p_seq = struct.unpack_from(
                 "<IIIII", page_data, 0
             )
+            if page_idx != current_page_idx:
+                raise ValueError(
+                    f"PDB page index mismatch: expected {current_page_idx}, found {page_idx}."
+                )
             raw18 = struct.unpack_from("<I", page_data, 0x18)[0]
             num_row_offsets = raw18 & 0x1FFF
             num_rows = (raw18 >> 13) & 0x7FF
             page_flags = (raw18 >> 24) & 0xFF
 
             # If data page (flags & 0x40 == 0) and num_row_offsets > 0
-            if (page_flags & 0x40) == 0 and num_row_offsets > 0:
+            if (page_flags & 0x40) == 0 and num_row_offsets > 0 and num_rows > 0:
                 num_groups = ((num_row_offsets - 1) // 16) + 1
+                present_rows_seen = 0
                 for g in range(num_groups):
+                    if present_rows_seen >= num_rows:
+                        break
                     base = self.len_page - (g * 0x24)
+                    if base - 0x24 < 0x28:
+                        break
                     row_present_flags = struct.unpack_from("<H", page_data, base - 4)[0]
 
                     for r in range(16):
+                        if present_rows_seen >= num_rows:
+                            break
                         row_global_idx = g * 16 + r
                         if row_global_idx >= num_row_offsets:
                             break
                         is_present = (row_present_flags >> r) & 1
                         if not is_present:
                             continue
+                        present_rows_seen += 1
 
                         ofs_row = struct.unpack_from("<H", page_data, base - (6 + 2 * r))[0]
                         row_base = 0x28 + ofs_row
 
-                        if row_base + 0x88 > self.len_page:
+                        if row_base < 0x28 or row_base + 0x88 > self.len_page:
                             continue
 
                         sample_rate = struct.unpack_from("<I", page_data, row_base + 0x08)[0]
@@ -185,9 +245,12 @@ class PDBManager:
                         ofs_strings = struct.unpack_from("<21H", page_data, row_base + 0x5e)
 
                         title, _, _ = self._read_dsql_string(page_data, row_base, ofs_strings[17])
-                        filename, _, _ = self._read_dsql_string(page_data, row_base, ofs_strings[19])
-                        file_path, _, _ = self._read_dsql_string(page_data, row_base, ofs_strings[20])
+                        filename, filename_pos, _ = self._read_dsql_string(page_data, row_base, ofs_strings[19])
+                        file_path, filepath_pos, _ = self._read_dsql_string(page_data, row_base, ofs_strings[20])
                         analyze_path, _, _ = self._read_dsql_string(page_data, row_base, ofs_strings[14])
+
+                        if not filename or not file_path or not filename_pos or not filepath_pos:
+                            continue
 
                         tracks.append(
                             TrackInfo(
@@ -245,8 +308,9 @@ class PDBManager:
         for ofs, text in ((track.ofs_strings[19], new_filename), (track.ofs_strings[20], new_filepath)):
             if ofs != 0:
                 pos = row_base + ofs
-                encoded = self._encode_dsql_string(text)
-                self.data[pos : pos + len(encoded)] = encoded
+                allocation = self._string_alloc_size(pos)
+                encoded = self._encode_dsql_string(text, self.data[pos] == 0x90)
+                self.data[pos : pos + allocation] = encoded + (b"\x00" * (allocation - len(encoded)))
 
         # Increment page sequence number
         page_seq = struct.unpack_from("<I", self.data, page_offset + 0x10)[0]
@@ -270,12 +334,37 @@ class PDBManager:
         """Saves changes back to export.pdb atomically."""
         if backup and self.pdb_path.exists():
             backup_path = self.pdb_path.with_suffix(".pdb.bak")
-            shutil.copy2(self.pdb_path, backup_path)
+            backup_temp = backup_path.with_name(
+                f".{backup_path.name}.{uuid.uuid4().hex}.tmp"
+            )
+            try:
+                shutil.copy2(self.pdb_path, backup_temp)
+                with open(backup_temp, "rb") as backup_file:
+                    os.fsync(backup_file.fileno())
+                os.replace(backup_temp, backup_path)
+            finally:
+                backup_temp.unlink(missing_ok=True)
 
-        temp_path = self.pdb_path.with_suffix(".pdb.tmp")
-        with open(temp_path, "wb") as f:
-            f.write(self.data)
+        temp_path = self.pdb_path.with_name(
+            f".{self.pdb_path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            with open(temp_path, "wb") as f:
+                f.write(self.data)
+                f.flush()
+                os.fsync(f.fileno())
 
-        # Atomically replace
-        os.replace(temp_path, self.pdb_path)
+            # Atomically replace
+            os.replace(temp_path, self.pdb_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
+        if os.name == "posix":
+            try:
+                directory_fd = os.open(str(self.pdb_path.parent), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
         return self.pdb_path

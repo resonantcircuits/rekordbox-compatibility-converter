@@ -3,6 +3,7 @@
 import os
 import shutil
 import struct
+import uuid
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -13,28 +14,44 @@ class ANLZManager:
     @staticmethod
     def read_path(anlz_file: Path) -> Optional[str]:
         """Reads the audio path from an ANLZ file's PPTH tag."""
-        if not anlz_file.exists():
+        if not anlz_file.is_file():
             return None
 
-        with open(anlz_file, "rb") as f:
-            data = f.read()
+        try:
+            with open(anlz_file, "rb") as f:
+                data = f.read()
+        except OSError:
+            return None
 
         if len(data) < 28 or data[:4] != b"PMAI":
             return None
 
-        magic, len_header, len_file = struct.unpack_from(">4sII", data, 0)
+        _, len_header, len_file = struct.unpack_from(">4sII", data, 0)
+        if len_header != 28 or len_file != len(data):
+            return None
         pos = len_header
 
         while pos + 12 <= len(data):
-            fourcc, hdr_len, tag_len = struct.unpack_from(">4sII", data, pos)
-            if tag_len < 12:
+            fourcc, _, tag_len = struct.unpack_from(">4sII", data, pos)
+            if tag_len < 12 or pos + tag_len > len(data):
                 return None
             if fourcc == b"PPTH":
+                if tag_len < 18 or pos + 16 > len(data):
+                    return None
+                hdr_len = struct.unpack_from(">I", data, pos + 4)[0]
+                if hdr_len != 16:
+                    return None
                 len_path = struct.unpack_from(">I", data, pos + 12)[0]
-                if len_path > 2:
-                    raw_bytes = data[pos + 16 : pos + 16 + len_path - 2]
-                    return raw_bytes.decode("utf-16be", errors="replace")
-                return ""
+                path_end = pos + 16 + len_path
+                if len_path < 2 or len_path % 2 or path_end > pos + tag_len:
+                    return None
+                raw_bytes = data[pos + 16 : path_end]
+                if raw_bytes[-2:] != b"\x00\x00":
+                    return None
+                try:
+                    return raw_bytes[:-2].decode("utf-16be")
+                except UnicodeDecodeError:
+                    return None
             pos += tag_len
 
         return None
@@ -42,38 +59,44 @@ class ANLZManager:
     @staticmethod
     def update_path(anlz_file: Path, new_audio_path: str, backup: bool = False) -> bool:
         """Updates the audio path in the PPTH tag and adjusts file lengths."""
-        if not anlz_file.exists():
+        if not anlz_file.is_file():
             return False
 
-        with open(anlz_file, "rb") as f:
-            data = bytearray(f.read())
+        try:
+            with open(anlz_file, "rb") as f:
+                data = bytearray(f.read())
+        except OSError:
+            return False
 
         if len(data) < 28 or data[:4] != b"PMAI":
             return False
 
-        magic, len_header, len_file = struct.unpack_from(">4sII", data, 0)
+        _, len_header, len_file = struct.unpack_from(">4sII", data, 0)
+        if len_header != 28 or len_file != len(data):
+            return False
         pos = len_header
         ppth_found = False
 
         while pos + 12 <= len(data):
             fourcc, hdr_len, tag_len = struct.unpack_from(">4sII", data, pos)
-            if tag_len < 12:
+            if tag_len < 12 or pos + tag_len > len(data):
                 break
             if fourcc == b"PPTH":
+                if tag_len < 18 or pos + 16 > len(data) or hdr_len != 16:
+                    break
                 ppth_found = True
                 # Prepare new UTF-16BE path
-                encoded_path = new_audio_path.encode("utf-16be") + b"\x00\x00"
+                try:
+                    encoded_path = new_audio_path.encode("utf-16be") + b"\x00\x00"
+                except UnicodeEncodeError:
+                    return False
                 new_len_path = len(encoded_path)
                 new_tag_len = 12 + 4 + new_len_path
 
                 # Align to 4-byte boundary if needed
                 pad_bytes = (4 - (new_tag_len % 4)) % 4
                 encoded_path += b"\x00" * pad_bytes
-                new_len_path += pad_bytes
                 new_tag_len += pad_bytes
-
-                # Calculate length delta
-                delta = new_tag_len - tag_len
 
                 # Construct new PPTH section
                 new_ppth = struct.pack(">4sIII", b"PPTH", hdr_len, new_tag_len, new_len_path) + encoded_path
@@ -81,9 +104,9 @@ class ANLZManager:
                 # Replace section in data
                 data[pos : pos + tag_len] = new_ppth
 
-                # Update file header length
-                new_len_file = len_file + delta
-                struct.pack_into(">I", data, 8, new_len_file)
+                # PMAI len_file is at offset 0x08 and should describe the
+                # actual rewritten byte length, even if the old value was stale.
+                struct.pack_into(">I", data, 8, len(data))
                 break
 
             pos += tag_len
@@ -93,11 +116,32 @@ class ANLZManager:
 
         if backup:
             bak_path = anlz_file.with_suffix(anlz_file.suffix + ".bak")
-            shutil.copy2(anlz_file, bak_path)
+            bak_temp = bak_path.with_name(f".{bak_path.name}.{uuid.uuid4().hex}.tmp")
+            try:
+                shutil.copy2(anlz_file, bak_temp)
+                with open(bak_temp, "rb") as backup_file:
+                    os.fsync(backup_file.fileno())
+                os.replace(bak_temp, bak_path)
+            finally:
+                bak_temp.unlink(missing_ok=True)
 
-        tmp_path = anlz_file.with_suffix(anlz_file.suffix + ".tmp")
-        with open(tmp_path, "wb") as f:
-            f.write(data)
+        tmp_path = anlz_file.with_name(f".{anlz_file.name}.{uuid.uuid4().hex}.tmp")
+        try:
+            with open(tmp_path, "wb") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
 
-        os.replace(tmp_path, anlz_file)
+            os.replace(tmp_path, anlz_file)
+        finally:
+            tmp_path.unlink(missing_ok=True)
+        if os.name == "posix":
+            try:
+                directory_fd = os.open(str(anlz_file.parent), os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+            except OSError:
+                pass
         return True

@@ -50,3 +50,8 @@ Thumbs.db
 *.app
 *.dmg
 *.exe
+
+# Local agent configuration
+.agents/
+.claude/
+.codex/

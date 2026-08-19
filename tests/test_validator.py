@@ -1,8 +1,10 @@
 """Tests for ExportValidator."""
 
+import struct
 from pathlib import Path
 from rekordbox_compatibility_converter.core.validator import ExportValidator
 from tests.test_engine import mock_usb
+from tests.test_pdb import create_minimal_pdb
 
 
 def test_validator_on_mock_usb(mock_usb: Path):
@@ -13,3 +15,55 @@ def test_validator_on_mock_usb(mock_usb: Path):
     assert report.passed_tracks == 1
     assert report.failed_tracks == 0
     assert len(report.issues) == 0
+
+
+def test_validator_rejects_bogus_audio_and_invalid_anlz(tmp_path: Path):
+    usb = tmp_path / "USB"
+    rekordbox = usb / "PIONEER" / "rekordbox"
+    anlz_dir = usb / "PIONEER" / "USBANLZ"
+    contents = usb / "Contents"
+    rekordbox.mkdir(parents=True)
+    anlz_dir.mkdir(parents=True)
+    contents.mkdir()
+
+    audio = contents / "song.flac"
+    audio.write_bytes(b"not audio")
+    create_minimal_pdb(
+        rekordbox,
+        file_size=audio.stat().st_size,
+        analyze_path="/PIONEER/USBANLZ/ANLZ0000.DAT",
+    )
+    (anlz_dir / "ANLZ0000.DAT").write_bytes(
+        struct.pack(">4sII", b"PMAI", 28, 52)
+        + (b"\x00" * 16)
+        + struct.pack(">4sII", b"PQTZ", 12, 24)
+        + (b"\x00" * 12)
+    )
+    (anlz_dir / "ANLZ0000.EXT").write_bytes(b"corrupt")
+
+    report = ExportValidator().validate(usb)
+
+    assert report.passed_tracks == 0
+    assert report.failed_tracks == 1
+    assert any("cannot be decoded" in issue.message.lower() for issue in report.issues)
+    assert any("no valid PPTH" in issue.message for issue in report.issues)
+
+
+def test_validator_rejects_anlz_path_outside_usb(tmp_path: Path):
+    usb = tmp_path / "USB"
+    rekordbox = usb / "PIONEER" / "rekordbox"
+    contents = usb / "Contents"
+    rekordbox.mkdir(parents=True)
+    contents.mkdir()
+    audio = contents / "song.flac"
+    audio.write_bytes(b"not audio")
+    create_minimal_pdb(
+        rekordbox,
+        file_size=audio.stat().st_size,
+        analyze_path="/../outside.DAT",
+    )
+    (tmp_path / "outside.DAT").write_bytes(b"must not be parsed")
+
+    report = ExportValidator().validate(usb)
+
+    assert any("Unsafe ANLZ path" in issue.message for issue in report.issues)

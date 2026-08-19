@@ -50,3 +50,19 @@ def test_convert_flac_to_aiff(sample_flac: Path, tmp_path: Path):
     info = converter.probe(target_aiff)
     assert info.get("sample_rate") == 44100
     assert "aiff" in info.get("format_name", "").lower()
+
+
+def test_audio_converter_rejects_unsupported_pcm_depth(sample_flac: Path, tmp_path: Path):
+    target = tmp_path / "invalid.aiff"
+
+    success, size, error = AudioConverter().convert(
+        sample_flac,
+        target,
+        target_format=TargetFormat.AIFF,
+        sample_depth=32,
+    )
+
+    assert success is False
+    assert size == 0
+    assert "Unsupported target PCM depth" in error
+    assert not target.exists()

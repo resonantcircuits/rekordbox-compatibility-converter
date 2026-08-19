@@ -2,15 +2,12 @@
 
 def main():
     try:
-        import customtkinter
-        from .modern_app import main as modern_main
-        modern_main()
-    except Exception:
-        # Fallback to standard ttk app
-        import tkinter as tk
-        from .modern_app import ModernRekordboxGUI
-        app = ModernRekordboxGUI()
-        app.mainloop()
+        from rekordbox_compatibility_converter.gui.modern_app import main as modern_main
+    except ImportError as exc:
+        raise SystemExit(
+            "The GUI requires CustomTkinter. Install project dependencies with 'uv sync'."
+        ) from exc
+    modern_main()
 
 
 if __name__ == "__main__":

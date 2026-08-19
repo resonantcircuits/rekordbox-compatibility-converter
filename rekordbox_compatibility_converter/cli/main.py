@@ -6,6 +6,7 @@ from typing import Optional
 
 import click
 from rich.console import Console
+from rich.markup import escape
 from rich.panel import Panel
 from rich.progress import BarColumn, Progress, SpinnerColumn, TextColumn, TimeRemainingColumn
 from rich.table import Table
@@ -24,8 +25,10 @@ def resolve_usb_path(path_arg: Optional[str]) -> Path:
     if path_arg:
         target = Path(path_arg).expanduser().resolve()
         if not target.exists():
-            console.print(f"[red]Error:[/red] Path does not exist: {target}")
+            console.print(f"[red]Error:[/red] Path does not exist: {escape(str(target))}")
             raise click.Abort()
+        if not target.is_dir():
+            raise click.ClickException(f"Path is not a directory: {target}")
         return target
 
     detected = USBDetector.list_rekordbox_drives()
@@ -37,12 +40,15 @@ def resolve_usb_path(path_arg: Optional[str]) -> Path:
 
     if len(detected) == 1:
         drive_path, label = detected[0]
-        console.print(f"[green]Auto-detected Rekordbox drive:[/green] [bold]{label}[/bold] ({drive_path})")
+        console.print(
+            f"[green]Auto-detected Rekordbox drive:[/green] "
+            f"[bold]{escape(label)}[/bold] ({escape(str(drive_path))})"
+        )
         return drive_path
 
     console.print("[cyan]Multiple Rekordbox drives detected:[/cyan]")
     for idx, (drive_path, label) in enumerate(detected, 1):
-        console.print(f"  [{idx}] {label} ({drive_path})")
+        console.print(f"  [{idx}] {escape(label)} ({escape(str(drive_path))})")
 
     choice = click.prompt("Select drive number", type=int, default=1)
     if 1 <= choice <= len(detected):
@@ -83,8 +89,8 @@ def scan(path: Optional[str], profile: str, target_format: str):
 
     console.print(
         Panel(
-            f"[bold cyan]Scanning Rekordbox Drive:[/bold cyan] {usb_root}\n"
-            f"[bold cyan]Target Profile:[/bold cyan] {hw_profile.name}\n"
+            f"[bold cyan]Scanning Rekordbox Drive:[/bold cyan] {escape(str(usb_root))}\n"
+            f"[bold cyan]Target Profile:[/bold cyan] {escape(hw_profile.name)}\n"
             f"[bold cyan]Default Target Format:[/bold cyan] {target_format.upper()}",
             title="Rekordbox Compatibility Scan",
             expand=False,
@@ -99,8 +105,15 @@ def scan(path: Optional[str], profile: str, target_format: str):
         )
 
     if not summary.has_export_pdb:
-        console.print("[red]Error: No PIONEER/rekordbox/export.pdb found on this drive.[/red]")
-        return
+        if summary.has_dlp:
+            raise click.ClickException(
+                "This is a Device Library Plus-only export. Safe exportLibrary.db support is not implemented."
+            )
+        if summary.unsupported_reason:
+            raise click.ClickException(summary.unsupported_reason)
+        raise click.ClickException("No PIONEER/rekordbox/export.pdb found on this drive.")
+    if summary.has_dlp:
+        raise click.ClickException(summary.unsupported_reason or "Device Library Plus is unsupported.")
 
     table = Table(title="Audio Format Breakdown", show_header=True, header_style="bold magenta")
     table.add_column("Format", style="cyan")
@@ -109,9 +122,9 @@ def scan(path: Optional[str], profile: str, target_format: str):
 
     for fmt, count in sorted(summary.format_counts.items(), key=lambda x: -x[1]):
         if fmt in hw_profile.allowed_formats:
-            status = "[green]✓ Compatible[/green]"
+            status = "[green]Format recognized[/green]"
         else:
-            status = "[bold red]✗ Incompatible[/bold red]"
+            status = "[bold red]Format unsupported[/bold red]"
         table.add_row(f".{fmt.upper()}", str(count), status)
 
     console.print(table)
@@ -119,7 +132,7 @@ def scan(path: Optional[str], profile: str, target_format: str):
     console.print(f"[bold green]Compatible Tracks:[/bold green] {summary.compatible_tracks}")
 
     if summary.incompatible_tracks == 0:
-        console.print("\n[bold green]🎉 All tracks on this USB are 100% compatible with the selected profile![/bold green]\n")
+        console.print("\n[bold green]All tracks are compatible with the selected profile.[/bold green]\n")
         return
 
     console.print(f"[bold red]Incompatible Tracks:[/bold red] {summary.incompatible_tracks}")
@@ -133,14 +146,21 @@ def scan(path: Optional[str], profile: str, target_format: str):
 
     for t in summary.tasks[:10]:
         cur_spec = f"{t.track.sample_rate}Hz {t.track.sample_depth}bit"
-        task_table.add_row(str(t.track.id), t.track.title or "(No Title)", t.track.filename, cur_spec, t.target_filename)
+        task_table.add_row(
+            str(t.track.id),
+            escape(t.track.title or "(No Title)"),
+            escape(t.track.filename),
+            cur_spec,
+            escape(t.target_filename),
+        )
 
     console.print(task_table)
     if len(summary.tasks) > 10:
         console.print(f"[dim]... and {len(summary.tasks) - 10} more tracks.[/dim]\n")
 
     console.print(
-        f"[yellow]To convert these tracks, run:[/yellow] [bold cyan]rbconvert convert {usb_root} --profile {profile}[/bold cyan]\n"
+        f"[yellow]To convert these tracks, run:[/yellow] "
+        f"[bold cyan]rbconvert convert {escape(str(usb_root))} --profile {profile}[/bold cyan]\n"
     )
 
 
@@ -164,7 +184,7 @@ def scan(path: Optional[str], profile: str, target_format: str):
 @click.option(
     "--threads",
     "-t",
-    type=int,
+    type=click.IntRange(1, 32),
     default=min(8, os.cpu_count() or 4),
     help="Number of parallel audio conversion worker threads.",
 )
@@ -227,8 +247,14 @@ def convert(
     )
 
     if not summary.has_export_pdb:
-        console.print("[red]Error: No PIONEER/rekordbox/export.pdb found on this drive.[/red]")
-        return
+        if summary.has_dlp:
+            raise click.ClickException(
+                "This is a Device Library Plus-only export. Safe exportLibrary.db support is not implemented."
+            )
+        raise click.ClickException("No PIONEER/rekordbox/export.pdb found on this drive.")
+
+    if summary.has_dlp:
+        raise click.ClickException(summary.unsupported_reason or "Device Library Plus is unsupported.")
 
     if summary.incompatible_tracks == 0:
         console.print("\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n")
@@ -236,12 +262,12 @@ def convert(
 
     console.print(
         Panel(
-            f"[bold]Target Drive:[/bold] {usb_root}\n"
-            f"[bold]Target Profile:[/bold] {hw_profile.name}\n"
+            f"[bold]Target Drive:[/bold] {escape(str(usb_root))}\n"
+            f"[bold]Target Profile:[/bold] {escape(hw_profile.name)}\n"
             f"[bold]Tracks to Convert:[/bold] [bold red]{len(summary.tasks)}[/bold red]\n"
             f"[bold]Target Audio Format:[/bold] [bold green]{target_format.upper()}[/bold green]\n"
             f"[bold]Parallel Workers:[/bold] {threads} threads\n"
-            f"[bold]Delete Originals After Conversion:[/bold] {'Yes (Space-saving Option A)' if not keep_originals else 'No (Keep originals)'}\n"
+            f"[bold]Delete Originals After Durable Commit:[/bold] {'Yes' if not keep_originals else 'No (Keep originals)'}\n"
             f"[bold]Clean macOS Ghost Files (._*):[/bold] {'Yes' if clean_dotfiles else 'No'}\n"
             f"[bold]Create Database Backups:[/bold] {'Yes (.bak)' if not no_backup else 'No'}",
             title="Conversion Confirmation",
@@ -268,7 +294,7 @@ def convert(
         bar = progress.add_task("[cyan]Converting tracks in parallel...", total=len(summary.tasks))
 
         def on_progress(task, current, total):
-            short_name = task.track.filename
+            short_name = escape(task.track.filename)
             if len(short_name) > 30:
                 short_name = short_name[:27] + "..."
             progress.update(bar, advance=1, description=f"[cyan]Finished ({current}/{total}): [bold]{short_name}[/bold]")
@@ -283,34 +309,50 @@ def convert(
         )
 
     if result.get("success"):
-        cleaned_msg = f"\n• Cleaned {result.get('cleaned_dotfiles', 0)} macOS ghost (._*) files." if clean_dotfiles else ""
+        cleaned_msg = f"\n• Cleaned {result.get('cleaned_dotfiles', 0)} macOS ghost files." if clean_dotfiles else ""
+        original_msg = (
+            "• Original removal was attempted only after each durable database commit."
+            if not keep_originals
+            else "• Original audio files were retained."
+        )
+        result_warnings = result.get("warnings") or []
+        warning_msg = f"\n• Warning: {escape(result_warnings[0])}" if result_warnings else ""
         console.print(
             Panel(
-                f"[bold green]✓ Successfully converted {result['completed']} tracks in parallel![/bold green]\n"
+                f"[bold green]Successfully converted {result['completed']} tracks.[/bold green]\n"
                 f"• Database [cyan]export.pdb[/cyan] successfully patched and synced.\n"
-                f"• Analysis beatgrids and waveforms ([cyan]ANLZ[/cyan]) paths updated.{cleaned_msg}\n"
-                f"• USB is now fully ready for the CDJ booth!",
+                f"• Updated {result.get('anlz_updated', 0)} analysis path files ([cyan]ANLZ[/cyan]).{cleaned_msg}\n"
+                f"{original_msg}{warning_msg}",
                 title="Conversion Complete",
                 border_style="green",
             )
         )
     else:
+        error_detail = escape(str(result.get("error") or "One or more tracks failed."))
+        preflight = result.get("preflight_errors") or []
+        task_errors = [task.error for task in summary.tasks if task.error]
+        errors = preflight or task_errors
+        first_error = f"\n• First error: {escape(errors[0])}" if errors else ""
         console.print(
             Panel(
-                f"[bold yellow]Completed with warnings:[/bold yellow]\n"
+                f"[bold red]Conversion did not complete successfully.[/bold red]\n"
                 f"• Succeeded: {result.get('completed', 0)}\n"
-                f"• Failed: {result.get('failed', 0)}",
+                f"• Failed: {result.get('failed', 0)}\n"
+                f"• {error_detail}{first_error}",
                 title="Conversion Finished with Errors",
                 border_style="red",
             )
         )
 
-    if eject:
+    if eject and result.get("success"):
         success, emsg = engine.eject_drive(usb_root)
         if success:
-            console.print(f"[bold green]✓ {emsg}[/bold green]")
+            console.print(f"[bold green]{escape(emsg)}[/bold green]")
         else:
-            console.print(f"[yellow]Eject notice:[/yellow] {emsg}")
+            console.print(f"[yellow]Eject notice:[/yellow] {escape(emsg)}")
+
+    if not result.get("success"):
+        raise click.exceptions.Exit(1)
 
 
 @cli.command()
@@ -327,23 +369,37 @@ def restore(path: Optional[str]):
 
     success, msg = engine.restore_backup(usb_root)
     if success:
-        console.print(f"[bold green]✓ {msg}[/bold green]")
+        console.print(f"[bold green]{msg}[/bold green]")
     else:
-        console.print(f"[bold red]Error:[/bold red] {msg}")
+        raise click.ClickException(msg)
 
 
 @cli.command()
 @click.argument("path", required=False, type=str)
-def verify(path: Optional[str]):
+@click.option(
+    "--profile",
+    "-p",
+    type=click.Choice([p.value for p in CompatibilityProfileType], case_sensitive=False),
+    default=CompatibilityProfileType.STANDARD.value,
+    help="Validate actual audio against this CDJ hardware profile.",
+)
+def verify(path: Optional[str], profile: str):
     """Validates the integrity of all database entries, audio files, and ANLZ tags."""
     from ..core.validator import ExportValidator
 
     usb_root = resolve_usb_path(path)
-    console.print(Panel(f"[bold cyan]Validating USB Export:[/bold cyan] {usb_root}", title="Rekordbox Export Validator"))
+    console.print(
+        Panel(
+            f"[bold cyan]Validating USB Export:[/bold cyan] {escape(str(usb_root))}",
+            title="Rekordbox Export Validator",
+        )
+    )
 
     validator = ExportValidator()
     with console.status("[bold green]Running integrity checks on database & analysis files...[/bold green]"):
-        report = validator.validate(usb_root)
+        report = validator.validate(
+            usb_root, profile=get_profile(CompatibilityProfileType(profile))
+        )
 
     console.print(f"\n[bold]Total Tracks Inspected:[/bold] {report.total_tracks_checked}")
     console.print(f"[bold green]Passed Checks:[/bold green] {report.passed_tracks}")
@@ -359,13 +415,21 @@ def verify(path: Optional[str]):
 
         for issue in report.issues[:20]:
             sev_style = "[bold red]ERROR[/bold red]" if issue.severity == "ERROR" else "[yellow]WARN[/yellow]"
-            issue_table.add_row(str(issue.track_id), issue.track_title, sev_style, issue.message)
+            issue_table.add_row(
+                str(issue.track_id),
+                escape(issue.track_title),
+                sev_style,
+                escape(issue.message),
+            )
 
         console.print(issue_table)
         if len(report.issues) > 20:
             console.print(f"[dim]... and {len(report.issues) - 20} more issues.[/dim]\n")
     else:
-        console.print("\n[bold green]✓ All tracks, database entries, and ANLZ waveform references are 100% valid![/bold green]\n")
+        console.print("\n[bold green]All checked audio, database entries, and ANLZ references are valid.[/bold green]\n")
+
+    if report.issues:
+        raise click.exceptions.Exit(1)
 
 
 @cli.command()
@@ -381,7 +445,7 @@ def drives():
     table.add_column("Mount Path")
 
     for path, label in detected:
-        table.add_row(label, str(path))
+        table.add_row(escape(label), escape(str(path)))
 
     console.print(table)
 

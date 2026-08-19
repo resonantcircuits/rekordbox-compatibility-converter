@@ -22,7 +22,7 @@ This tool points directly at an exported Rekordbox USB drive and:
 - **Python Package Management**: Always use `uv` exclusively:
   - Virtual environment creation: `uv venv`
   - Package installation: `uv pip install ...` or `uv add ...`
-  - Running scripts, CLI, or tests: `uv run pytest -v`, `uv run rbconvert ...`, `uv run rbconvert-gui`
+  - Running scripts, CLI, or tests: `uv run --extra dev pytest -v`, `uv run rbconvert ...`, `uv run rbconvert-gui`
 - **Python Version**: Support Python 3.9+. Use modern typing (`typing.Optional`, `typing.List`, `typing.Dict`, `typing.Tuple`).
 - **External Dependencies**:
   - `click` & `rich` (CLI)
@@ -81,7 +81,7 @@ rekordbox_compatibility_converter/
 ### `ANLZ` Files (`.DAT` and `.EXT`)
 - **Format**: Big-endian tagged binary structure starting with magic header `PMAI` (28 bytes).
 - **Section Tag `PPTH`**: Contains the relative file path encoded in **UTF-16BE**.
-- **Header Sync**: If path length changes, both `PPTH` section length and `len_file` at offset `0x04` in the `PMAI` header must be recalculated.
+- **Header Sync**: If path length changes, both the `PPTH` section length and `len_file` at offset `0x08` in the `PMAI` header must be recalculated. Offset `0x04` stores `len_header`.
 
 ---
 
@@ -114,6 +114,6 @@ rekordbox_compatibility_converter/
 
 Before concluding any work, run the test suite:
 ```bash
-uv run pytest -v
+uv run --extra dev pytest -v
 ```
 All tests must pass. When adding new features, add corresponding unit tests in `tests/`.

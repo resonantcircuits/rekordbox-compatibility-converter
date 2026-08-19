@@ -12,6 +12,7 @@ def create_minimal_pdb(
     file_size: int = 50000000,
     filename: str = "song.flac",
     filepath: str = "/Contents/song.flac",
+    analyze_path: str = "",
 ) -> Path:
     """Creates a valid, minimal DeviceSQL export.pdb for testing."""
     len_page = 4096
@@ -54,27 +55,34 @@ def create_minimal_pdb(
     # Filepath at row_base + 0xC0
     ofs_title = 0x88
     ofs_fn = 0xA0
-    ofs_fp = 0xC0
+    ofs_fp = 0x100
+    ofs_analyze = 0x200
 
     # ofs_strings: 21 * u2 at row_base + 0x5e
     struct.pack_into("<H", page1, row_base + 0x5E + (17 * 2), ofs_title)
     struct.pack_into("<H", page1, row_base + 0x5E + (19 * 2), ofs_fn)
     struct.pack_into("<H", page1, row_base + 0x5E + (20 * 2), ofs_fp)
+    if analyze_path:
+        struct.pack_into("<H", page1, row_base + 0x5E + (14 * 2), ofs_analyze)
 
     # Encode "Test Song" (len 9) -> header = (10 << 1) | 1 = 21
     title_bytes = b"Test Song"
     page1[row_base + ofs_title] = (len(title_bytes) + 1) * 2 + 1
     page1[row_base + ofs_title + 1 : row_base + ofs_title + 1 + len(title_bytes)] = title_bytes
 
-    # Encode filename
-    fn_bytes = filename.encode()
-    page1[row_base + ofs_fn] = (len(fn_bytes) + 1) * 2 + 1
-    page1[row_base + ofs_fn + 1 : row_base + ofs_fn + 1 + len(fn_bytes)] = fn_bytes
+    def write_dsql_string(offset: int, value: str):
+        try:
+            encoded = value.encode("ascii")
+            payload = bytes([(len(encoded) + 1) * 2 + 1]) + encoded
+        except UnicodeEncodeError:
+            encoded = value.encode("utf-16le")
+            payload = struct.pack("<BHB", 0x90, len(encoded) + 4, 0x03) + encoded
+        page1[row_base + offset : row_base + offset + len(payload)] = payload
 
-    # Encode filepath
-    fp_bytes = filepath.encode()
-    page1[row_base + ofs_fp] = (len(fp_bytes) + 1) * 2 + 1
-    page1[row_base + ofs_fp + 1 : row_base + ofs_fp + 1 + len(fp_bytes)] = fp_bytes
+    write_dsql_string(ofs_fn, filename)
+    write_dsql_string(ofs_fp, filepath)
+    if analyze_path:
+        write_dsql_string(ofs_analyze, analyze_path)
 
     # Row Index Group at end of page
     # Base for group 0 is len_page = 4096
@@ -155,6 +163,42 @@ def test_pdb_refuses_growing_string(tmp_path: Path):
     assert t2.file_path == "/Contents/song.mp3"
 
 
+def test_pdb_rejects_string_allocation_outside_page(tmp_path: Path):
+    pdb_path = create_minimal_pdb(tmp_path)
+    data = bytearray(pdb_path.read_bytes())
+    page_start = 4096
+    row_base = page_start + 0x28
+    malformed_offset = 4095 - 0x28
+    struct.pack_into("<H", data, row_base + 0x5E + (19 * 2), malformed_offset)
+    data[page_start + 4095] = 0x90
+    pdb_path.write_bytes(data)
+
+    manager = PDBManager(pdb_path)
+
+    assert manager.tracks == []
+
+
+def test_pdb_caps_malformed_row_group_count(tmp_path: Path):
+    pdb_path = create_minimal_pdb(tmp_path)
+    data = bytearray(pdb_path.read_bytes())
+    struct.pack_into("<I", data, 4096 + 0x18, (0x24 << 24) | (1 << 13) | 0x1FFF)
+    pdb_path.write_bytes(data)
+
+    manager = PDBManager(pdb_path)
+
+    assert len(manager.tracks) == 1
+
+
+def test_pdb_rejects_table_directory_beyond_header_page(tmp_path: Path):
+    pdb_path = create_minimal_pdb(tmp_path)
+    data = bytearray(pdb_path.read_bytes())
+    struct.pack_into("<I", data, 8, 1000)
+    pdb_path.write_bytes(data)
+
+    with pytest.raises(ValueError, match="table directory"):
+        PDBManager(pdb_path)
+
+
 def test_dsql_long_string_roundtrip(tmp_path: Path):
     """Long (>=127 byte) strings must encode with the header layout the reader expects."""
     pdb_path = create_minimal_pdb(tmp_path)
@@ -165,7 +209,33 @@ def test_dsql_long_string_roundtrip(tmp_path: Path):
     assert encoded[0] == 0x40
 
     buf = bytearray(1024)
-    buf[16 : 16 + len(encoded)] = encoded
-    text, pos, total = mgr._read_dsql_string(buf, 0, 16)
+    buf[0x88 : 0x88 + len(encoded)] = encoded
+    text, pos, total = mgr._read_dsql_string(buf, 0, 0x88)
     assert text == long_path
     assert total == len(encoded)
+
+
+def test_pdb_unicode_path_roundtrip(tmp_path: Path):
+    pdb_path = create_minimal_pdb(
+        tmp_path,
+        filename="Beyoncé.flac",
+        filepath="/Contents/Beyoncé.flac",
+    )
+    mgr = PDBManager(pdb_path)
+    track = mgr.tracks[0]
+
+    assert track.filename == "Beyoncé.flac"
+    assert mgr.update_track(
+        track,
+        "Beyoncé.aiff",
+        "/Contents/Beyoncé.aiff",
+        1234,
+        44100,
+        16,
+        1411200,
+    )
+    mgr.save(backup=False)
+
+    updated = PDBManager(pdb_path).tracks[0]
+    assert updated.filename == "Beyoncé.aiff"
+    assert updated.file_path == "/Contents/Beyoncé.aiff"

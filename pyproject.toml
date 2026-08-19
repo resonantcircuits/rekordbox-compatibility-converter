@@ -1,9 +1,14 @@
 [project]
 name = "rekordbox-compatibility-converter"
 version = "0.2.0"
-description = "A fast, cross-platform CLI and modern Dark-Mode GUI utility to convert Rekordbox USB exports to CDJ-compatible audio formats with database and waveform synchronization."
+description = "A cross-platform CLI and GUI for safely converting DeviceSQL Rekordbox USB exports to CDJ-compatible audio."
 readme = "README.md"
 requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "Resonant Circuits", email = "resonantcircuits@pm.me" },
+]
 dependencies = [
     "click>=8.1.0",
     "rich>=13.0.0",
@@ -15,8 +20,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0.0",
-    "pyrekordbox>=0.4.0",
-    "sqlcipher3-wheels>=0.5.0",
     "pyinstaller>=6.0.0",
 ]
 
@@ -29,6 +32,18 @@ rbconvert-gui = "rekordbox_compatibility_converter.gui.app:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = [
+    "/.github",
+    "/.gitignore",
+    "/.agents",
+    "/.claude",
+    "/.codex",
+    "/.pytest_cache",
+    "/.venv",
+    "/AGENTS.md",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["rekordbox_compatibility_converter"]

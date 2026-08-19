@@ -12,9 +12,14 @@ def create_minimal_anlz(tmp_path: Path, audio_path: str) -> Path:
     encoded_path = audio_path.encode("utf-16be") + b"\x00\x00"
     len_path = len(encoded_path)
     tag_len = 12 + 4 + len_path
+    padding = (4 - (tag_len % 4)) % 4
 
     # PPTH Tag: fourcc (4s), hdr_len (u4), tag_len (u4), len_path (u4), path (bytes)
-    ppth_tag = struct.pack(">4sIII", b"PPTH", 12, tag_len, len_path) + encoded_path
+    ppth_tag = (
+        struct.pack(">4sIII", b"PPTH", 16, tag_len + padding, len_path)
+        + encoded_path
+        + (b"\x00" * padding)
+    )
 
     # PQTZ Tag (dummy beatgrid): 24 bytes
     pqtz_tag = struct.pack(">4sIII", b"PQTZ", 12, 24, 0) + (b"\x00" * 8)
@@ -59,3 +64,30 @@ def test_anlz_corrupt_zero_length_tag_does_not_hang(tmp_path: Path):
 
     assert ANLZManager.read_path(anlz_file) is None
     assert ANLZManager.update_path(anlz_file, "/Contents/x.aiff") is False
+
+
+def test_anlz_even_length_path_does_not_gain_trailing_null(tmp_path: Path):
+    anlz_file = create_minimal_anlz(tmp_path, "/xx.flac")
+
+    assert ANLZManager.update_path(anlz_file, "/xx.aiff") is True
+    assert ANLZManager.read_path(anlz_file) == "/xx.aiff"
+
+
+def test_anlz_truncated_ppth_is_rejected_without_exception(tmp_path: Path):
+    header = struct.pack(">4sII", b"PMAI", 28, 40) + (b"\x00" * 16)
+    truncated = struct.pack(">4sII", b"PPTH", 16, 12)
+    anlz_file = tmp_path / "ANLZ0002.DAT"
+    anlz_file.write_bytes(header + truncated)
+
+    assert ANLZManager.read_path(anlz_file) is None
+    assert ANLZManager.update_path(anlz_file, "/Contents/x.aiff") is False
+
+
+def test_anlz_rejects_incorrect_file_length_header(tmp_path: Path):
+    anlz_file = create_minimal_anlz(tmp_path, "/Contents/song.flac")
+    data = bytearray(anlz_file.read_bytes())
+    struct.pack_into(">I", data, 8, len(data) + 4)
+    anlz_file.write_bytes(data)
+
+    assert ANLZManager.read_path(anlz_file) is None
+    assert ANLZManager.update_path(anlz_file, "/Contents/song.aiff") is False

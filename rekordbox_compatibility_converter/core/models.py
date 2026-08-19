@@ -2,8 +2,8 @@
 
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
-from typing import List, Optional
+from pathlib import Path, PurePosixPath
+from typing import Dict, List, Optional
 
 
 class TargetFormat(str, Enum):
@@ -32,17 +32,17 @@ class TrackInfo:
     bitrate: int = 1411200
     file_size: int = 0
     duration: int = 0
+    codec_name: str = ""
+    channels: int = 2
     page_idx: int = 0            # export.pdb page index
     row_offset: int = 0          # export.pdb offset inside page
     ofs_strings: tuple = field(default_factory=tuple)
 
     @property
     def extension(self) -> str:
-        if "." in self.filename:
-            return self.filename.rsplit(".", 1)[-1].lower()
-        if "." in self.file_path:
-            return self.file_path.rsplit(".", 1)[-1].lower()
-        return ""
+        filename_suffix = PurePosixPath(self.filename).suffix
+        path_suffix = PurePosixPath(self.file_path).suffix
+        return (filename_suffix or path_suffix).lstrip(".").lower()
 
 
 @dataclass
@@ -68,6 +68,8 @@ class ConversionTask:
     anlz_ext_path: Optional[Path] = None
     status: str = "pending"
     new_file_size: int = 0
+    output_probe: Dict = field(default_factory=dict)
+    warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
 
 
@@ -84,3 +86,5 @@ class ScanSummary:
     has_dlp: bool = False
     free_space_bytes: int = 0
     estimated_extra_bytes: int = 0
+    unsupported_reason: Optional[str] = None
+    pdb_sha256: str = ""

@@ -15,7 +15,7 @@ from ..core.usb_detector import USBDetector
 from ..core.profiles import get_profile
 
 PROFILE_DESCRIPTIONS = {
-    "standard": "Standard Club — converts FLAC/ALAC to AIFF and downsamples >48 kHz. For CDJ-2000NXS, CDJ-900NXS, XDJ-1000/700/RX/RX2.",
+    "standard": "Standard Club — converts FLAC/ALAC and normalizes unsupported PCM to 44.1/48 kHz. For CDJ-2000NXS, CDJ-900NXS, XDJ-1000/700/RX/RX2.",
     "maximum": "Maximum Compatibility — enforces 16-bit 44.1 kHz AIFF for vintage gear (CDJ-2000 original, CDJ-850, CDJ-350, XDJ-AERO).",
     "modern": "Modern Flagship — allows FLAC, ALAC and high-res audio up to 24-bit 96 kHz for CDJ-3000, CDJ-2000NXS2, XDJ-XZ, XDJ-RX3, OPUS-QUAD.",
 }
@@ -42,6 +42,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self.summary: Optional[ScanSummary] = None
         self.is_converting = False
         self.is_scanning = False
+        self.scan_generation = 0
         self.drive_map: Dict[str, Path] = {}
 
         self._build_ui()
@@ -61,14 +62,14 @@ class ModernRekordboxGUI(ctk.CTk):
             fg_color = "#F2F2F7"
             hdr_bg = "#2C2C2E"
             hdr_fg = "#FFFFFF"
-            selected_bg = "#0A84FF"
+            selected_bg = "#0057A8"
         else:
             bg_color = "#FFFFFF"
             stripe_color = "#F4F4F6"
             fg_color = "#1C1C1E"
             hdr_bg = "#E8E8ED"
             hdr_fg = "#1C1C1E"
-            selected_bg = "#007AFF"
+            selected_bg = "#0057A8"
 
         style.configure(
             "Treeview",
@@ -191,9 +192,9 @@ class ModernRekordboxGUI(ctk.CTk):
 
         self.drive_menu = ctk.CTkOptionMenu(grid, values=["Scanning..."], command=self._on_drive_selected, height=32)
         self.drive_menu.grid(row=1, column=0, sticky="ew", pady=(4, 0))
-        btn_browse = ctk.CTkButton(grid, text="Browse...", width=100, height=32, command=self._browse_folder)
-        btn_browse.grid(row=1, column=1, padx=(10, 0), pady=(4, 0))
-        btn_refresh = ctk.CTkButton(
+        self.btn_browse = ctk.CTkButton(grid, text="Browse...", width=100, height=32, command=self._browse_folder)
+        self.btn_browse.grid(row=1, column=1, padx=(10, 0), pady=(4, 0))
+        self.btn_refresh = ctk.CTkButton(
             grid,
             text="Refresh",
             width=90,
@@ -202,7 +203,7 @@ class ModernRekordboxGUI(ctk.CTk):
             hover_color=("gray65", "gray40"),
             command=self._refresh_drives,
         )
-        btn_refresh.grid(row=1, column=2, padx=(8, 0), pady=(4, 0))
+        self.btn_refresh.grid(row=1, column=2, padx=(8, 0), pady=(4, 0))
 
         # Settings row: three labeled groups on one aligned grid
         settings = ctk.CTkFrame(config_card, fg_color="transparent")
@@ -213,7 +214,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self._field_label(settings, "Parallel Threads").grid(row=0, column=2, sticky="w", padx=(24, 0))
 
         self.profile_var = ctk.StringVar(value="standard")
-        profile_menu = ctk.CTkOptionMenu(
+        self.profile_menu = ctk.CTkOptionMenu(
             settings,
             values=["standard", "maximum", "modern"],
             variable=self.profile_var,
@@ -221,17 +222,18 @@ class ModernRekordboxGUI(ctk.CTk):
             height=30,
             command=self._on_profile_changed,
         )
-        profile_menu.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.profile_menu.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
         self.format_var = ctk.StringVar(value="aiff")
-        format_menu = ctk.CTkOptionMenu(
+        self.format_menu = ctk.CTkOptionMenu(
             settings,
             values=["aiff", "wav", "mp3"],
             variable=self.format_var,
             width=110,
             height=30,
+            command=self._on_format_changed,
         )
-        format_menu.grid(row=1, column=1, sticky="w", padx=(24, 0), pady=(4, 0))
+        self.format_menu.grid(row=1, column=1, sticky="w", padx=(24, 0), pady=(4, 0))
 
         threads_box = ctk.CTkFrame(settings, fg_color="transparent")
         threads_box.grid(row=1, column=2, sticky="w", padx=(24, 0), pady=(4, 0))
@@ -313,8 +315,8 @@ class ModernRekordboxGUI(ctk.CTk):
             action_bar,
             text="Scan USB Drive",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color=("#007AFF", "#0A84FF"),
-            hover_color=("#0062CC", "#0071E3"),
+            fg_color=("#0067C5", "#0062B8"),
+            hover_color=("#0062CC", "#0057A8"),
             text_color="#FFFFFF",
             height=40,
             corner_radius=8,
@@ -326,8 +328,8 @@ class ModernRekordboxGUI(ctk.CTk):
             action_bar,
             text="Convert Incompatible Tracks",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color=("#28A745", "#2EA043"),
-            hover_color=("#218838", "#3FB950"),
+            fg_color=("#187434", "#176B31"),
+            hover_color=("#218838", "#238636"),
             text_color="#FFFFFF",
             text_color_disabled=("#8C8C91", "#76767A"),
             height=40,
@@ -406,8 +408,28 @@ class ModernRekordboxGUI(ctk.CTk):
 
     def _on_profile_changed(self, choice: str):
         self.lbl_profile_desc.configure(text=PROFILE_DESCRIPTIONS.get(choice, ""))
-        if self.summary and not self.is_converting and not self.is_scanning:
+        if not self.is_converting and (self.summary or self.is_scanning):
             self._start_scan()
+
+    def _on_format_changed(self, _choice: str):
+        if not self.is_converting and (self.summary or self.is_scanning):
+            self._start_scan()
+
+    def _set_conversion_controls(self, enabled: bool):
+        """Prevents drive or conversion settings from changing during a commit."""
+        state = "normal" if enabled else "disabled"
+        for widget in (
+            self.drive_menu,
+            self.btn_browse,
+            self.btn_refresh,
+            self.profile_menu,
+            self.format_menu,
+            self.threads_slider,
+            self.del_switch,
+            self.dotfiles_switch,
+            self.backup_switch,
+        ):
+            widget.configure(state=state)
 
     def _refresh_drives(self):
         detected = USBDetector.list_rekordbox_drives()
@@ -425,6 +447,7 @@ class ModernRekordboxGUI(ctk.CTk):
         else:
             self.drive_menu.configure(values=["No Rekordbox USB detected"])
             self.drive_menu.set("No Rekordbox USB detected")
+            self._on_drive_selected("No Rekordbox USB detected")
 
     def _browse_folder(self):
         path = filedialog.askdirectory(title="Select Rekordbox USB Export Directory")
@@ -439,6 +462,10 @@ class ModernRekordboxGUI(ctk.CTk):
             self._on_drive_selected(display)
 
     def _on_drive_selected(self, choice: str):
+        self.scan_generation += 1
+        self.is_scanning = False
+        self.summary = None
+        self.btn_scan.configure(state="normal")
         self.btn_convert.configure(state="disabled")
         self.card_total.val_label.configure(text="--")
         self.card_compat.val_label.configure(text="--")
@@ -461,6 +488,10 @@ class ModernRekordboxGUI(ctk.CTk):
             messagebox.showerror("Error", f"Path does not exist: {usb_path}")
             return
 
+        self.scan_generation += 1
+        scan_generation = self.scan_generation
+        profile_type = CompatibilityProfileType(self.profile_var.get())
+        target_fmt = TargetFormat(self.format_var.get())
         self.is_scanning = True
         self.lbl_status.configure(text="Scanning database...")
         self.tree.delete(*self.tree.get_children())
@@ -469,24 +500,32 @@ class ModernRekordboxGUI(ctk.CTk):
 
         def run():
             try:
-                profile_type = CompatibilityProfileType(self.profile_var.get())
                 hw_profile = get_profile(profile_type)
-                target_fmt = TargetFormat(self.format_var.get())
-
                 summary = self.engine.scan(
                     usb_root=usb_path,
                     profile=hw_profile,
                     forced_target_format=target_fmt,
                 )
             except Exception as e:
-                self.after(0, lambda: self._on_scan_error(str(e)))
+                msg = str(e)
+                self.after(0, lambda m=msg, g=scan_generation: self._on_scan_error(m, g))
                 return
-            self.summary = summary
-            self.after(0, self._render_scan)
+            self.after(
+                0,
+                lambda s=summary, g=scan_generation, p=usb_path: self._accept_scan_result(g, p, s),
+            )
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _on_scan_error(self, msg: str):
+    def _accept_scan_result(self, generation: int, usb_path: Path, summary: ScanSummary):
+        if generation != self.scan_generation or usb_path != self._get_selected_path():
+            return
+        self.summary = summary
+        self._render_scan()
+
+    def _on_scan_error(self, msg: str, generation: int):
+        if generation != self.scan_generation:
+            return
         self.is_scanning = False
         self.btn_scan.configure(state="normal")
         self.lbl_status.configure(text="Scan failed.")
@@ -495,9 +534,23 @@ class ModernRekordboxGUI(ctk.CTk):
     def _render_scan(self):
         self.is_scanning = False
         self.btn_scan.configure(state="normal")
-        if not self.summary or not self.summary.has_export_pdb:
-            messagebox.showerror("Error", "No PIONEER/rekordbox/export.pdb found on this drive.")
-            self.lbl_status.configure(text="Scan failed: export.pdb missing.")
+        if not self.summary:
+            return
+        if self.summary.has_dlp:
+            messagebox.showerror(
+                "Unsupported Export",
+                self.summary.unsupported_reason or "Device Library Plus cannot be synchronized safely.",
+            )
+            self.lbl_status.configure(text="Conversion disabled: Device Library Plus is present.")
+            self.btn_convert.configure(state="disabled")
+            return
+        if not self.summary.has_export_pdb:
+            messagebox.showerror(
+                "Error",
+                self.summary.unsupported_reason
+                or "No PIONEER/rekordbox/export.pdb found on this drive.",
+            )
+            self.lbl_status.configure(text="Scan failed: export is missing or unsafe.")
             return
 
         for i, task in enumerate(self.summary.tasks):
@@ -533,7 +586,16 @@ class ModernRekordboxGUI(ctk.CTk):
         if not self.summary or not self.summary.tasks:
             return
 
+        tools_ok, tools_message = self.engine.audio_converter.check_tools()
+        if not tools_ok:
+            messagebox.showerror("FFmpeg Not Found", tools_message)
+            return
+
         threads = int(self.threads_slider.get())
+        conversion_summary = self.summary
+        delete_original = self.del_switch.get() == 1
+        create_backup = self.backup_switch.get() == 1
+        clean_dotfiles = self.dotfiles_switch.get() == 1
         confirm = messagebox.askyesno(
             "Confirm Conversion",
             f"Convert {len(self.summary.tasks)} tracks in parallel ({threads} threads) to {self.format_var.get().upper()}?\n\n"
@@ -546,26 +608,32 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_scan.configure(state="disabled")
         self.btn_convert.configure(state="disabled")
         self.btn_restore.configure(state="disabled")
+        self._set_conversion_controls(False)
         self.progress_bar.set(0)
 
         def run():
             try:
                 def on_prog(task, cur, total_count):
                     pct = cur / total_count
-                    self.after(0, lambda: self._update_prog(pct, task.track.filename))
+                    filename = task.track.filename
+                    self.after(0, lambda p=pct, n=filename: self._update_prog(p, n))
 
                 result = self.engine.execute(
-                    summary=self.summary,
-                    delete_original=self.del_switch.get() == 1,
-                    backup=self.backup_switch.get() == 1,
+                    summary=conversion_summary,
+                    delete_original=delete_original,
+                    backup=create_backup,
                     threads=threads,
-                    clean_dotfiles=self.dotfiles_switch.get() == 1,
+                    clean_dotfiles=clean_dotfiles,
                     progress_callback=on_prog,
                 )
             except Exception as e:
-                self.after(0, lambda: self._on_conversion_error(str(e)))
+                msg = str(e)
+                self.after(0, lambda m=msg: self._on_conversion_error(m))
                 return
-            self.after(0, lambda: self._on_finish(result))
+            self.after(
+                0,
+                lambda r=result, s=conversion_summary, d=delete_original: self._on_finish(r, s, d),
+            )
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -575,13 +643,17 @@ class ModernRekordboxGUI(ctk.CTk):
 
     def _on_conversion_error(self, msg: str):
         self.is_converting = False
+        self._set_conversion_controls(True)
         self.btn_scan.configure(state="normal")
         self.btn_restore.configure(state="normal")
         self.lbl_status.configure(text="Conversion failed.")
         messagebox.showerror("Conversion Failed", f"An unexpected error occurred:\n{msg}")
 
-    def _on_finish(self, result: dict):
+    def _on_finish(
+        self, result: dict, conversion_summary: ScanSummary, delete_original: bool
+    ):
         self.is_converting = False
+        self._set_conversion_controls(True)
         self.btn_scan.configure(state="normal")
         self.btn_restore.configure(state="normal")
         self.progress_bar.set(1.0)
@@ -589,19 +661,29 @@ class ModernRekordboxGUI(ctk.CTk):
         if result.get("success"):
             self.lbl_status.configure(text=f"Conversion complete: {result.get('completed', 0)} tracks converted.")
             cleaned = result.get("cleaned_dotfiles", 0)
-            dot_msg = f"\n- Cleaned {cleaned} macOS ghost files (._*)" if cleaned else ""
-            messagebox.showinfo(
-                "Conversion Complete",
+            dot_msg = f"\n- Cleaned {cleaned} macOS ghost files" if cleaned else ""
+            original_msg = (
+                "- Original removal was attempted only after each durable commit."
+                if delete_original
+                else "- Original audio files were retained."
+            )
+            warnings = result.get("warnings") or []
+            warning_msg = f"\n\nWarning:\n{warnings[0]}" if warnings else ""
+            show_result = messagebox.showwarning if warnings else messagebox.showinfo
+            show_result(
+                "Conversion Complete with Warnings" if warnings else "Conversion Complete",
                 f"Successfully converted {result['completed']} tracks.\n\n"
                 f"- Database export.pdb patched and synced.\n"
-                f"- Waveforms and beatgrids intact.{dot_msg}\n"
-                f"- USB is ready for Pioneer CDJ/XDJ booth.",
+                f"- Updated {result.get('anlz_updated', 0)} ANLZ path files.{dot_msg}\n"
+                f"{original_msg}{warning_msg}",
             )
         else:
             completed = result.get("completed", 0)
             failed = result.get("failed", 0)
             self.lbl_status.configure(text=f"Conversion finished with errors: {completed} converted, {failed} failed.")
-            errors = [t.error for t in (self.summary.tasks if self.summary else []) if t.error]
+            errors = [t.error for t in conversion_summary.tasks if t.error]
+            if result.get("error"):
+                errors.insert(0, result["error"])
             detail = f"\n\nFirst error:\n{errors[0]}" if errors else ""
             messagebox.showwarning(
                 "Completed with Errors",

@@ -20,6 +20,9 @@ def test_track_info_extension():
     t3 = TrackInfo(id=3, filename="Track_no_ext", file_path="/Contents/Artist/Album/Track_no_ext")
     assert t3.extension == ""
 
+    t4 = TrackInfo(id=4, filename="Track", file_path="/Contents/Artist.Name/Track")
+    assert t4.extension == ""
+
 
 def test_scan_summary():
     summary = ScanSummary(usb_root=Path("/fake/usb"))

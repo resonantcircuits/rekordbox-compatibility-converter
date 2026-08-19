@@ -7,22 +7,32 @@ on:
   pull_request:
     branches: [main, master]
 
+permissions:
+  contents: read
+
 jobs:
   test:
     name: Test on ${{ matrix.os }} (Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-        python-version: ['3.10', '3.11', '3.12']
+        include:
+          - { os: ubuntu-latest, python-version: '3.9' }
+          - { os: ubuntu-latest, python-version: '3.10' }
+          - { os: ubuntu-latest, python-version: '3.11' }
+          - { os: ubuntu-latest, python-version: '3.12' }
+          - { os: ubuntu-latest, python-version: '3.13' }
+          - { os: ubuntu-latest, python-version: '3.14' }
+          - { os: macos-latest, python-version: '3.9' }
+          - { os: macos-latest, python-version: '3.14' }
+          - { os: windows-latest, python-version: '3.9' }
+          - { os: windows-latest, python-version: '3.14' }
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
       - name: Set up Python ${{ matrix.python-version }}
         run: uv python install ${{ matrix.python-version }}
@@ -42,41 +52,41 @@ jobs:
         run: choco install ffmpeg
 
       - name: Install dependencies
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
+        run: uv sync --frozen --extra dev --python ${{ matrix.python-version }}
 
       - name: Run test suite
-        run: uv run pytest -v
+        run: uv run --frozen --extra dev pytest -v
 
   build-executables:
-    name: Build Standalone Binary (${{ matrix.os }})
+    name: Build Desktop App (${{ matrix.os }})
     needs: test
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
     strategy:
       matrix:
         os: [macos-latest, windows-latest]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v3
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
 
       - name: Set up Python 3.11
         run: uv python install 3.11
 
       - name: Install dependencies & PyInstaller
-        run: |
-          uv venv
-          uv pip install -e ".[dev]"
-          uv pip install pyinstaller
+        run: uv sync --frozen --extra dev --python 3.11
+
+      - name: Smoke-test GUI entrypoint import
+        run: uv run --frozen --extra dev python -c "from rekordbox_compatibility_converter.gui.app import main; assert callable(main)"
 
       - name: Build macOS App
         if: runner.os == 'macOS'
         run: |
-          uv run pyinstaller --noconfirm --onedir --windowed --name "RekordboxFormatChecker" \
+          uv run --frozen --extra dev pyinstaller --noconfirm --onedir --windowed --name "RekordboxFormatChecker" \
             --collect-all customtkinter \
             rekordbox_compatibility_converter/gui/app.py
           cd dist && zip -r RekordboxFormatChecker-macOS.zip RekordboxFormatChecker.app
@@ -84,15 +94,24 @@ jobs:
       - name: Build Windows Exe
         if: runner.os == 'Windows'
         run: |
-          uv run pyinstaller --noconfirm --onefile --windowed --name "RekordboxFormatChecker" `
+          uv run --frozen --extra dev pyinstaller --noconfirm --onefile --windowed --name "RekordboxFormatChecker" `
             --collect-all customtkinter `
             rekordbox_compatibility_converter/gui/app.py
 
-      - name: Upload Release Artifacts
-        uses: softprops/action-gh-release@v2
+      - name: Upload macOS Release Artifact
+        if: runner.os == 'macOS'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
-          files: |
-            dist/RekordboxFormatChecker-macOS.zip
-            dist/RekordboxFormatChecker.exe
+          files: dist/RekordboxFormatChecker-macOS.zip
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload Windows Release Artifact
+        if: runner.os == 'Windows'
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: dist/RekordboxFormatChecker.exe
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

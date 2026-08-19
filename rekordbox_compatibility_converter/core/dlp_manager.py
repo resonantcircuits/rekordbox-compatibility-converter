@@ -1,13 +1,11 @@
-"""Manager for Rekordbox 6.8+ DeviceLibraryPlus (exportLibrary.db)."""
+"""Detection and safety policy for Device Library Plus exports."""
 
-import os
-import shutil
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Tuple
 
 
 class DLPManager:
-    """Handles updates to Device Library Plus exportLibrary.db if present."""
+    """Detects Device Library Plus and prevents unsupported mutation."""
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -18,7 +16,10 @@ class DLPManager:
         """Checks if exportLibrary.db exists and whether it can be accessed."""
         if not self.is_present:
             return False, "Not present"
-        return True, "Present (Device Library Plus)"
+        return False, (
+            "Device Library Plus is present, but safe exportLibrary.db updates "
+            "are not implemented in this version."
+        )
 
     def update_track_path(
         self,
@@ -31,15 +32,5 @@ class DLPManager:
         new_bit_depth: int,
         backup: bool = True,
     ) -> bool:
-        """Attempts to update track in exportLibrary.db if SQLCipher connection is available."""
-        if not self.is_present:
-            return False
-
-        if backup and self.db_path.exists():
-            bak = self.db_path.with_suffix(".db.bak")
-            if not bak.exists():
-                shutil.copy2(self.db_path, bak)
-
-        # DeviceLibraryPlus is updated when Rekordbox re-syncs, but if sqlcipher3 is installed
-        # and database key is accessible, update djmdContent
-        return True
+        """Refuses to claim an update until the encrypted schema is supported."""
+        return False

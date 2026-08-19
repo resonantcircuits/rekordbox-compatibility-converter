@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
@@ -44,14 +45,29 @@ class AudioConverter:
             info = json.loads(result.stdout)
             audio_stream = next((s for s in info.get("streams", []) if s.get("codec_type") == "audio"), {})
 
-            sample_rate = int(audio_stream.get("sample_rate", 44100))
-            bits_per_sample = int(audio_stream.get("bits_per_raw_sample") or audio_stream.get("bits_per_sample") or 16)
+            if not audio_stream:
+                return {"probe_error": "No audio stream found", "size": file_path.stat().st_size}
+
+            sample_rate = int(audio_stream.get("sample_rate") or 0)
+            codec_name = audio_stream.get("codec_name", "")
+            bits_per_sample = int(audio_stream.get("bits_per_raw_sample") or audio_stream.get("bits_per_sample") or 0)
+            if bits_per_sample == 0 and codec_name in {"mp3", "aac"}:
+                bits_per_sample = 16
             channels = int(audio_stream.get("channels", 2))
-            bit_rate = int(info.get("format", {}).get("bit_rate") or (sample_rate * channels * bits_per_sample))
+            if sample_rate <= 0 or channels <= 0:
+                return {
+                    "probe_error": "Audio stream has invalid sample-rate or channel metadata",
+                    "size": file_path.stat().st_size,
+                }
+            bit_rate = int(
+                info.get("format", {}).get("bit_rate")
+                or audio_stream.get("bit_rate")
+                or (sample_rate * channels * bits_per_sample)
+            )
 
             return {
                 "format_name": info.get("format", {}).get("format_name", ""),
-                "codec_name": audio_stream.get("codec_name", ""),
+                "codec_name": codec_name,
                 "sample_rate": sample_rate,
                 "bits_per_sample": bits_per_sample,
                 "channels": channels,
@@ -60,12 +76,9 @@ class AudioConverter:
                 "size": int(info.get("format", {}).get("size", file_path.stat().st_size)),
                 "tags": info.get("format", {}).get("tags", {}),
             }
-        except Exception:
+        except Exception as exc:
             return {
-                "sample_rate": 44100,
-                "bits_per_sample": 16,
-                "channels": 2,
-                "bit_rate": 1411200,
+                "probe_error": str(exc),
                 "size": file_path.stat().st_size if file_path.exists() else 0,
             }
 
@@ -87,9 +100,22 @@ class AudioConverter:
 
         if not source_path.exists():
             return False, 0, f"Source file does not exist: {source_path}"
+        if not source_path.is_file():
+            return False, 0, f"Source path is not a regular file: {source_path}"
+        if target_path.exists():
+            return False, 0, f"Refusing to overwrite existing target: {target_path}"
+        if sample_rate <= 0:
+            return False, 0, f"Invalid target sample rate: {sample_rate}"
+        if target_format in {TargetFormat.AIFF, TargetFormat.WAV} and sample_depth not in {16, 24}:
+            return False, 0, f"Unsupported target PCM depth: {sample_depth}-bit"
 
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_target = target_path.with_name(f"{target_path.stem}.tmp{target_path.suffix}")
+        try:
+            target_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            return False, 0, f"Could not create target directory: {exc}"
+        tmp_target = target_path.with_name(
+            f".{target_path.stem}.{uuid.uuid4().hex}.tmp{target_path.suffix}"
+        )
 
         fmt_flag = target_format.value
         if target_format == TargetFormat.AIFF:
@@ -103,23 +129,35 @@ class AudioConverter:
             self.ffmpeg_bin,
             "-y",
             "-i", str(source_path),
+            "-map", "0:a:0",
             "-ar", str(sample_rate),
             "-map_metadata", "0",
             "-f", fmt_flag,
         ]
 
-        # Apply TPDF dithering if converting to 16-bit or resampled
-        if dither:
+        source_info = self.probe(source_path)
+        source_rate = int(source_info.get("sample_rate") or 0)
+        source_depth = int(source_info.get("bits_per_sample") or 0)
+
+        # TPDF dithering is useful for bit-depth reduction or resampling, but
+        # should not be forced onto a same-rate, same-depth lossless transfer.
+        if dither and (
+            (source_depth and sample_depth < source_depth)
+            or (source_rate and sample_rate != source_rate)
+        ):
             cmd.extend(["-dither_method", "triangular"])
 
         if target_format == TargetFormat.AIFF:
             codec = "pcm_s16be" if sample_depth == 16 else "pcm_s24be"
-            cmd.extend(["-c:a", codec, "-write_id3v2", "1"])
+            cmd.extend(["-map", "0:v?", "-c:a", codec, "-c:v", "mjpeg", "-write_id3v2", "1"])
         elif target_format == TargetFormat.WAV:
             codec = "pcm_s16le" if sample_depth == 16 else "pcm_s24le"
             cmd.extend(["-c:a", codec])
         elif target_format == TargetFormat.MP3:
-            cmd.extend(["-c:a", "libmp3lame", "-b:a", "320k", "-id3v2_version", "3"])
+            cmd.extend([
+                "-map", "0:v?", "-c:a", "libmp3lame", "-b:a", "320k",
+                "-c:v", "mjpeg", "-id3v2_version", "3",
+            ])
         else:
             codec = "pcm_s16be"
             cmd.extend(["-c:a", codec])
@@ -134,9 +172,48 @@ class AudioConverter:
                 return False, 0, f"FFmpeg error: {res.stderr.strip()}"
 
             if not tmp_target.exists() or tmp_target.stat().st_size == 0:
+                tmp_target.unlink(missing_ok=True)
                 return False, 0, "FFmpeg produced empty output file."
 
+            output_info = self.probe(tmp_target)
+            if output_info.get("probe_error"):
+                tmp_target.unlink(missing_ok=True)
+                return False, 0, f"Converted output failed validation: {output_info['probe_error']}"
+            if int(output_info.get("sample_rate") or 0) != sample_rate:
+                tmp_target.unlink(missing_ok=True)
+                return False, 0, "Converted output has an unexpected sample rate."
+            if target_format in {TargetFormat.AIFF, TargetFormat.WAV}:
+                expected_codec = {
+                    (TargetFormat.AIFF, 16): "pcm_s16be",
+                    (TargetFormat.AIFF, 24): "pcm_s24be",
+                    (TargetFormat.WAV, 16): "pcm_s16le",
+                    (TargetFormat.WAV, 24): "pcm_s24le",
+                }.get((target_format, sample_depth))
+                if not expected_codec or output_info.get("codec_name") != expected_codec:
+                    tmp_target.unlink(missing_ok=True)
+                    return False, 0, "Converted output has an unexpected PCM encoding."
+                if int(output_info.get("bits_per_sample") or 0) != sample_depth:
+                    tmp_target.unlink(missing_ok=True)
+                    return False, 0, "Converted output has an unexpected sample depth."
+            elif target_format == TargetFormat.MP3 and output_info.get("codec_name") != "mp3":
+                tmp_target.unlink(missing_ok=True)
+                return False, 0, "Converted output is not MP3 audio."
+
+            with open(tmp_target, "rb") as converted_file:
+                os.fsync(converted_file.fileno())
+            if target_path.exists():
+                tmp_target.unlink(missing_ok=True)
+                return False, 0, f"Target appeared during conversion; refusing to overwrite: {target_path}"
             os.replace(tmp_target, target_path)
+            if os.name == "posix":
+                try:
+                    directory_fd = os.open(str(target_path.parent), os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+                except OSError:
+                    pass
             new_size = target_path.stat().st_size
             return True, new_size, None
 

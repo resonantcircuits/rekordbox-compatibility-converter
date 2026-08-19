@@ -1,136 +1,130 @@
-# Rekordbox Format Checker & CDJ Compatibility Converter
+# Rekordbox Compatibility Converter
 
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
-[![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](tests/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A high-speed, cross-platform CLI and modern Dark-Mode GUI utility designed for DJs that converts exported Rekordbox USB libraries into CDJ/XDJ-compatible audio formats (e.g. FLAC $\rightarrow$ AIFF/WAV/MP3) while **automatically synchronizing the `export.pdb` database, `ANLZ` analysis files (beatgrids, cues, waveforms), and `DeviceLibraryPlus`**.
+A cross-platform CLI and desktop GUI for checking an exported Rekordbox USB and converting incompatible audio to CDJ/XDJ-compatible AIFF, WAV, or MP3.
 
----
+The converter updates the DeviceSQL `PIONEER/rekordbox/export.pdb` database and referenced `ANLZxxxx.DAT`/`.EXT` analysis paths. It stages output under unique temporary names, refuses target collisions and unsafe paths, commits each database update durably, and only then removes the original audio when requested.
 
-## The Problem
+## Why it exists
 
-When DJs export tracks to a USB drive from Rekordbox, many legacy and standard club CDJs (such as the industry-standard **CDJ-2000NXS**, **CDJ-900NXS**, **XDJ-1000 MK1**, **XDJ-700**, **XDJ-RX**, and **CDJ-2000 original**) do not support **FLAC**, **ALAC**, or sample rates above **48 kHz**. 
+Many established club players, including the CDJ-2000NXS, CDJ-900NXS, XDJ-1000 MK1, XDJ-700, XDJ-RX, and original CDJ-2000, cannot play FLAC, ALAC, or high-resolution PCM files. Unsupported tracks can fail with `E-8302: CANNOT PLAY TRACK` or `UNSUPPORTED FILE FORMAT`.
 
-When loading a FLAC track on these players, the player throws:
-> `E-8302: CANNOT PLAY TRACK` or `UNSUPPORTED FILE FORMAT`
+Manual conversion breaks the paths stored in Rekordbox's exported database and analysis files. This tool keeps those references synchronized for DeviceSQL exports.
 
-Rekordbox does not provide an "Export in Compatible Format" option. Manually converting files on a computer breaks Rekordbox track paths, waveforms, beatgrids, and hot cues.
+## Capabilities
 
-## The Solution
+- Converts incompatible audio in parallel with FFmpeg.
+- Produces 16/24-bit AIFF or WAV, or 320 kbps MP3.
+- Distinguishes AAC from ALAC inside ambiguous `.m4a` containers with `ffprobe`.
+- Updates `export.pdb` filenames, paths, sizes, sample rates, bit depths, and bitrates.
+- Updates PPTH paths in referenced ANLZ `.DAT` and `.EXT` files.
+- Verifies that audio is decodable and agrees with database metadata.
+- Detects missing, malformed, or mismatched ANLZ paths.
+- Removes AppleDouble (`._*`) and `.DS_Store` files when enabled.
+- Checks fresh free-space availability for worst-case parallel staging and backups.
+- Refuses collisions, paths outside the selected USB, missing sidecars, and unsupported Device Library Plus exports before conversion starts.
 
-This tool points directly at an **already-exported Rekordbox USB drive** and:
-1. **Converts incompatible audio in parallel** (FLAC/ALAC $\rightarrow$ 16/24-bit 44.1/48kHz AIFF or WAV) using multi-threaded FFmpeg with audiophile TPDF dithering and ID3 artwork preservation.
-2. **Maintains sample-accurate beatgrids & cues**: Because lossless AIFF is uncompressed PCM with bit-identical sample timing, Rekordbox beatgrids and hot cues remain 100% accurate with **zero grid drift**.
-3. **Patches the binary `export.pdb` database**: Updates track filenames, file paths, file sizes, sample rates, bit depths, and bitrates directly in the Pioneer `DeviceSQL` database.
-4. **Patches `ANLZ` analysis files (`.DAT` and `.EXT`)**: Updates internal `PPTH` file path tags so waveforms and beatgrids load seamlessly on CDJs.
-5. **Space-Saving In-Place Conversion (Option A)**: Automatically frees USB disk space by deleting each original FLAC only after successful conversion and database synchronization.
-6. **Cleans macOS Ghost Files**: Automatically removes hidden AppleDouble (`._*`) and `.DS_Store` files that can cause CDJs to freeze or display read errors.
-7. **One-Click Backup & Rollback**: Creates automatic `.bak` backups and provides an instant `restore` command.
+## Compatibility profiles
 
----
+| Profile | Target hardware | Rules |
+| :--- | :--- | :--- |
+| `standard` | CDJ-2000NXS, CDJ-900NXS, XDJ-1000/700/RX/RX2 | Converts FLAC/ALAC and PCM outside 44.1/48 kHz. Allows supported MP3/AAC rates. |
+| `maximum` | CDJ-2000 original, CDJ-850, CDJ-350, XDJ-AERO | Enforces 16-bit, 44.1 kHz AIFF/WAV/MP3 output. |
+| `modern` | CDJ-3000, CDJ-2000NXS2, XDJ-XZ, XDJ-RX3, OPUS-QUAD | Accepts FLAC, ALAC, AIFF, and WAV through 24-bit/96 kHz at supported discrete rates. |
 
-## Compatibility Profiles
+## Requirements and installation
 
-| Profile | Target Hardware | Conversion Rules | Default Target |
-| :--- | :--- | :--- | :--- |
-| **`standard`** *(Default)* | CDJ-2000NXS, CDJ-900NXS, XDJ-1000, XDJ-700, XDJ-RX/RX2 | • Convert FLAC/ALAC $\rightarrow$ AIFF<br>• Downsample $>48\text{ kHz}$ to 44.1/48 kHz<br>• Keep MP3, AAC, and valid WAV/AIFF intact | **AIFF** (16/24-bit) |
-| **`maximum`** *(Legacy)* | CDJ-2000 orig, CDJ-850, CDJ-350, XDJ-AERO | • Enforce strict 16-bit 44.1 kHz AIFF/WAV/MP3 for vintage players | **AIFF** (16-bit 44.1 kHz) |
-| **`modern`** *(Validation)* | CDJ-3000, CDJ-2000NXS2, XDJ-XZ, XDJ-RX3, OPUS-QUAD | • Allows FLAC, ALAC, WAV up to 24-bit 96 kHz.<br>• Validates database integrity | **AIFF** |
+- Python 3.9 or newer
+- FFmpeg and ffprobe available on `PATH`
+- `uv`
 
----
+Install FFmpeg with `brew install ffmpeg` on macOS, `choco install ffmpeg` on Windows, or your Linux distribution's package manager.
 
-## Installation
+From an existing checkout:
 
-### Requirements
-- **Python 3.9+**
-- **FFmpeg** installed on your system (`brew install ffmpeg` on macOS, `choco install ffmpeg` on Windows, or `apt install ffmpeg` on Linux).
-
-### Using `uv` (Recommended)
 ```bash
-git clone https://github.com/your-username/rekordbox-compatibility-converter.git
-cd rekordbox-compatibility-converter
-uv venv
-uv pip install -e ".[dev]"
+uv sync --extra dev
 ```
 
-### Using standard `pip`
+## CLI usage
+
+Scan an explicitly selected export:
+
 ```bash
-pip install -e .
+uv run rbconvert scan /Volumes/YOUR_USB
 ```
 
----
+If exactly one Rekordbox USB is connected, the path may be omitted:
 
-## Usage
-
-### 1. Modern Dark-Mode GUI
-
-Launch the visual application:
 ```bash
-rbconvert-gui
-```
-- Select your USB drive from the auto-populated dropdown.
-- Choose your desired CDJ profile and target format.
-- Adjust parallel worker threads to match your CPU cores.
-- Click **"Scan USB Drive"** to view a live breakdown of your library and incompatible tracks.
-- Click **"Convert Incompatible Tracks"** to start the parallel conversion with real-time progress tracking.
-
----
-
-### 2. Command-Line Interface (CLI)
-
-#### Auto-Detect & Scan USB Drive (Dry Run)
-```bash
-rbconvert scan
-# Or specify mount path explicitly:
-rbconvert scan /Volumes/YOUR_USB
+uv run rbconvert scan
 ```
 
-#### Convert Incompatible Tracks (Multi-Threaded)
+Convert after an interactive confirmation:
+
 ```bash
-# Interactive conversion with confirmation prompt
-rbconvert convert /Volumes/YOUR_USB
-
-# Non-interactive immediate conversion with 8 parallel worker threads
-rbconvert convert /Volumes/YOUR_USB -y --threads 8
-
-# Specify target profile (e.g. legacy CDJ-350/850)
-rbconvert convert /Volumes/YOUR_USB --profile maximum -y
-
-# Convert to 320kbps MP3 or WAV instead of AIFF
-rbconvert convert /Volumes/YOUR_USB --format mp3 -y
-
-# Safely eject USB after conversion
-rbconvert convert /Volumes/YOUR_USB -y --eject
+uv run rbconvert convert /Volumes/YOUR_USB
 ```
 
-#### Verify Database & Waveform Integrity
+Examples:
+
 ```bash
-rbconvert verify /Volumes/YOUR_USB
+uv run rbconvert convert /Volumes/YOUR_USB --profile maximum --yes
+uv run rbconvert convert /Volumes/YOUR_USB --format mp3 --threads 8 --yes
+uv run rbconvert convert /Volumes/YOUR_USB --keep-originals --yes
+uv run rbconvert convert /Volumes/YOUR_USB --yes --eject
 ```
 
-#### Restore from Backup (.bak)
+Verify actual audio, database metadata, profile compatibility, and ANLZ references:
+
 ```bash
-rbconvert restore /Volumes/YOUR_USB
+uv run rbconvert verify /Volumes/YOUR_USB --profile standard
 ```
 
-#### List Detected Drives & Profiles
+List detected drives and profiles:
+
 ```bash
-rbconvert drives
-rbconvert profiles
+uv run rbconvert drives
+uv run rbconvert profiles
 ```
 
----
+### Backup restoration
 
-## Running Tests
+Database and ANLZ backups are created by default. Restoration is deliberately refused if the backup's referenced original audio files are missing or have changed, because restoring metadata alone would create broken track references.
 
-Run the test suite via `uv`:
+Restoration is therefore useful when originals were retained:
+
 ```bash
-uv run pytest -v
+uv run rbconvert restore /Volumes/YOUR_USB
 ```
 
----
+Backups are not substitutes for a separate copy of the USB. Keep an external backup before modifying a performance library.
+
+## Desktop GUI
+
+```bash
+uv run rbconvert-gui
+```
+
+The GUI supports dark, light, and system appearance modes, drive detection, profile descriptions, conversion controls, a track table, and progress reporting.
+
+## Device Library Plus limitation
+
+`exportLibrary.db` is an encrypted Device Library Plus database with different synchronization requirements. This release detects it but does not modify it. If Device Library Plus is present, conversion fails before audio or database files are changed.
+
+Re-export the USB using a supported DeviceSQL `export.pdb` workflow before using the converter. The application does not claim Device Library Plus synchronization until that implementation can be tested against real exports.
+
+## Development and tests
+
+```bash
+uv sync --extra dev
+uv run --extra dev pytest -v
+```
+
+The CI matrix covers Python 3.9 through 3.14 and Linux, macOS, and Windows.
 
 ## License
 
-MIT License.
+[MIT](LICENSE)
