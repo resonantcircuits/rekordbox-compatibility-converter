@@ -1,10 +1,27 @@
 """Tests for audio conversion with FFmpeg."""
 
+import os
 import subprocess
+import sys
 from pathlib import Path
 import pytest
 from rekordbox_compatibility_converter.core.audio_converter import AudioConverter
 from rekordbox_compatibility_converter.core.models import TargetFormat
+
+
+def test_audio_converter_prefers_bundled_tools_when_frozen(tmp_path, monkeypatch):
+    executable_suffix = ".exe" if os.name == "nt" else ""
+    ffmpeg = tmp_path / f"ffmpeg{executable_suffix}"
+    ffprobe = tmp_path / f"ffprobe{executable_suffix}"
+    ffmpeg.touch()
+    ffprobe.touch()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path), raising=False)
+
+    converter = AudioConverter()
+
+    assert converter.ffmpeg_bin == str(ffmpeg)
+    assert converter.ffprobe_bin == str(ffprobe)
 
 
 @pytest.fixture

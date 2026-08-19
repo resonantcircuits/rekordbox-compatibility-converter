@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import uuid
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -15,11 +16,23 @@ class AudioConverter:
     """Manages audio probing, format conversion, and metadata preservation."""
 
     def __init__(self, ffmpeg_bin: str = "ffmpeg", ffprobe_bin: str = "ffprobe"):
-        self.ffmpeg_bin = shutil.which(ffmpeg_bin) or ffmpeg_bin
-        self.ffprobe_bin = shutil.which(ffprobe_bin) or ffprobe_bin
+        self.ffmpeg_bin = self._resolve_tool(ffmpeg_bin)
+        self.ffprobe_bin = self._resolve_tool(ffprobe_bin)
+
+    @staticmethod
+    def _resolve_tool(requested: str) -> str:
+        """Find a PyInstaller-bundled tool before falling back to PATH."""
+        if requested in {"ffmpeg", "ffprobe"} and getattr(sys, "frozen", False):
+            bundle_root = getattr(sys, "_MEIPASS", None)
+            if bundle_root:
+                executable_name = requested + (".exe" if os.name == "nt" else "")
+                bundled_tool = Path(bundle_root) / executable_name
+                if bundled_tool.is_file():
+                    return str(bundled_tool)
+        return shutil.which(requested) or requested
 
     def check_tools(self) -> Tuple[bool, str]:
-        """Verifies ffmpeg and ffprobe are available in system PATH."""
+        """Verifies bundled or system ffmpeg and ffprobe executables are available."""
         if not shutil.which(self.ffmpeg_bin):
             return False, f"ffmpeg binary not found at '{self.ffmpeg_bin}'"
         if not shutil.which(self.ffprobe_bin):
