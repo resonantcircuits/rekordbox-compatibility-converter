@@ -206,7 +206,11 @@ class ModernRekordboxGUI(ctk.CTk):
             action_bar,
             text="🔍 Scan USB Drive",
             font=ctk.CTkFont(size=14, weight="bold"),
-            height=38,
+            fg_color=("#007AFF", "#0A84FF"),
+            hover_color=("#0062CC", "#0071E3"),
+            text_color="#FFFFFF",
+            height=40,
+            corner_radius=8,
             command=self._start_scan,
         )
         self.btn_scan.pack(side="left", padx=(0, 10))
@@ -215,10 +219,12 @@ class ModernRekordboxGUI(ctk.CTk):
             action_bar,
             text="⚡ Convert Incompatible Tracks",
             font=ctk.CTkFont(size=14, weight="bold"),
-            fg_color=("#28A745", "#30D158"),
-            hover_color=("#218838", "#28CD41"),
-            text_color=("#FFFFFF", "#000000"),
-            height=38,
+            fg_color=("#28A745", "#2EA043"),
+            hover_color=("#218838", "#3FB950"),
+            text_color="#FFFFFF",
+            text_color_disabled=("#8C8C91", "#76767A"),
+            height=40,
+            corner_radius=8,
             state="disabled",
             command=self._start_conversion,
         )
@@ -227,9 +233,12 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_restore = ctk.CTkButton(
             action_bar,
             text="↺ Restore Backup",
-            fg_color=("gray75", "gray30"),
-            hover_color=("gray65", "gray40"),
-            height=38,
+            font=ctk.CTkFont(size=13),
+            fg_color=("gray75", "#3A3A3C"),
+            hover_color=("gray65", "#48484A"),
+            text_color=("#1C1C1E", "#FFFFFF"),
+            height=40,
+            corner_radius=8,
             command=self._restore_backup,
         )
         self.btn_restore.pack(side="left")
