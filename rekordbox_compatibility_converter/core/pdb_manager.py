@@ -10,6 +10,9 @@ from typing import Dict, List, Tuple
 from .models import TrackInfo
 
 
+TRACK_FILE_TYPE_OFFSET = 0x5A
+
+
 class PDBManager:
     """Reads and updates Rekordbox export.pdb and exportExt.pdb database files."""
 
@@ -241,6 +244,9 @@ class PDBManager:
                         track_id = struct.unpack_from("<I", page_data, row_base + 0x48)[0]
                         sample_depth = struct.unpack_from("<H", page_data, row_base + 0x52)[0]
                         duration = struct.unpack_from("<H", page_data, row_base + 0x54)[0]
+                        file_type = struct.unpack_from(
+                            "<H", page_data, row_base + TRACK_FILE_TYPE_OFFSET
+                        )[0]
 
                         ofs_strings = struct.unpack_from("<21H", page_data, row_base + 0x5e)
 
@@ -263,6 +269,7 @@ class PDBManager:
                                 sample_depth=sample_depth,
                                 bitrate=bitrate,
                                 file_size=file_size,
+                                file_type=file_type,
                                 duration=duration,
                                 page_idx=current_page_idx,
                                 row_offset=row_base,
@@ -285,6 +292,7 @@ class PDBManager:
         new_sample_rate: int,
         new_sample_depth: int,
         new_bitrate: int,
+        new_file_type: int,
     ) -> bool:
         """Updates a track record in the PDB buffer.
 
@@ -297,12 +305,17 @@ class PDBManager:
 
         if not self.can_fit_strings(track, new_filename, new_filepath):
             return False
+        if not 0 <= new_file_type <= 0xFFFF:
+            return False
 
         # Update binary numerical fields
         struct.pack_into("<I", self.data, row_base + 0x08, new_sample_rate)
         struct.pack_into("<I", self.data, row_base + 0x10, new_filesize)
         struct.pack_into("<I", self.data, row_base + 0x30, new_bitrate)
         struct.pack_into("<H", self.data, row_base + 0x52, new_sample_depth)
+        struct.pack_into(
+            "<H", self.data, row_base + TRACK_FILE_TYPE_OFFSET, new_file_type
+        )
 
         # Update filename (ofs_strings[19]) and filepath (ofs_strings[20]) in place
         for ofs, text in ((track.ofs_strings[19], new_filename), (track.ofs_strings[20], new_filepath)):
@@ -327,6 +340,7 @@ class PDBManager:
         track.sample_rate = new_sample_rate
         track.sample_depth = new_sample_depth
         track.bitrate = new_bitrate
+        track.file_type = new_file_type
 
         return True
 

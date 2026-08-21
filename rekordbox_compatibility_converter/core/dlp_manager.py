@@ -42,6 +42,10 @@ ONELIBRARY_BRIDGE_PROMPT = (
     "4. Right-click OneLibrary (Device Library Plus in Rekordbox 6).\n"
     "5. Click Convert from Device Library and approve the overwrite warnings.\n"
     "6. Open OneLibrary under the USB and verify the converted tracks.\n\n"
+    "AFTER STEP 2 — Reclaim USB space (optional)\n"
+    "Return to this app and click Remove Retained Originals. The app will verify each converted "
+    "replacement before showing exactly how many originals can be removed. Do not delete all "
+    "FLAC files manually.\n\n"
     "Until Step 2 is complete, do not use this USB on a OneLibrary player. Rekordbox may remove "
     "playlists or histories stored only in OneLibrary when it overwrites that catalog. Test on "
     "a complete copy of the USB.\n\n"
@@ -68,9 +72,12 @@ ONELIBRARY_REBUILD_REQUIRED_MESSAGE = (
     "5. Click Convert from Device Library.\n"
     "6. Approve Rekordbox's overwrite warnings.\n"
     "7. Open OneLibrary under the USB and verify that the converted tracks appear.\n"
-    "8. Eject the USB safely before testing it on equipment.\n\n"
+    "8. To reclaim the space used by retained originals, return to this app and click Remove "
+    "Retained Originals.\n"
+    "9. Eject the USB safely before testing it on equipment.\n\n"
     "All original audio files are still on the USB. Rekordbox may remove playlists or histories "
-    "stored only in OneLibrary when it overwrites that catalog."
+    "stored only in OneLibrary when it overwrites that catalog. Never delete every FLAC file "
+    "manually; the cleanup action removes only originals with verified converted replacements."
 )
 
 

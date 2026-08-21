@@ -1,6 +1,5 @@
 """Command-line interface for Rekordbox Format Checker & Converter."""
 
-import os
 from pathlib import Path
 from typing import Optional
 
@@ -13,7 +12,7 @@ from rich.table import Table
 
 from ..core.audio_converter import AudioConverter
 from ..core.dlp_manager import ONELIBRARY_REBUILD_REQUIRED_MESSAGE
-from ..core.engine import ConversionEngine
+from ..core.engine import DEFAULT_CONVERSION_THREADS, ConversionEngine
 from ..core.models import CompatibilityProfileType, TargetFormat
 from ..core.profiles import PROFILES, get_profile
 from ..core.usb_detector import USBDetector
@@ -207,7 +206,8 @@ def scan(
     "--threads",
     "-t",
     type=click.IntRange(1, 32),
-    default=min(8, os.cpu_count() or 4),
+    default=DEFAULT_CONVERSION_THREADS,
+    show_default=True,
     help="Number of parallel audio conversion worker threads.",
 )
 @click.option(
@@ -447,6 +447,64 @@ def restore(path: Optional[str]):
         console.print(f"[bold green]{msg}[/bold green]")
     else:
         raise click.ClickException(msg)
+
+
+@cli.command("cleanup-originals")
+@click.argument("path", required=False, type=str)
+@click.option(
+    "--yes",
+    "-y",
+    is_flag=True,
+    help="Confirm permanent removal after all safety checks pass.",
+)
+def cleanup_originals(path: Optional[str], yes: bool):
+    """Removes originals retained until the OneLibrary rebuild was verified."""
+    usb_root = resolve_usb_path(path)
+    engine = ConversionEngine()
+    with console.status("[bold green]Verifying retained originals and replacements...[/bold green]"):
+        plan = engine.plan_retained_original_cleanup(usb_root)
+
+    if plan.errors:
+        details = "\n".join(f"- {escape(error)}" for error in plan.errors)
+        raise click.ClickException(f"Cleanup safety checks failed; no files were removed.\n{details}")
+
+    reclaim_gib = plan.total_bytes / (1024 ** 3)
+    reclaim_mib = plan.total_bytes / (1024 ** 2)
+    reclaim_text = f"{reclaim_gib:.2f} GiB" if reclaim_gib >= 1 else f"{reclaim_mib:.1f} MiB"
+    console.print(
+        Panel(
+            f"[bold]Retained originals:[/bold] {len(plan.candidates)}\n"
+            f"[bold]Space to reclaim:[/bold] {reclaim_text}\n\n"
+            "Every converted replacement, Device Library entry, and ANLZ path passed validation.",
+            title="Retained Original Cleanup",
+            border_style="yellow",
+        )
+    )
+    if plan.warnings:
+        console.print(f"[yellow]Important:[/yellow] {escape(plan.warnings[0])}")
+
+    confirmation = (
+        "Permanently delete these originals? Continue only after Rekordbox OneLibrary > "
+        "Convert from Device Library completed, you verified the converted tracks in "
+        "OneLibrary, and you have another copy of the original audio."
+    )
+    if not yes and not click.confirm(confirmation, default=False):
+        console.print("[yellow]Cleanup canceled; no files were removed.[/yellow]")
+        return
+
+    result = engine.cleanup_retained_originals(plan)
+    if not result.get("success"):
+        details = "\n".join(
+            f"- {escape(error)}" for error in result.get("errors", [])
+        )
+        raise click.ClickException(
+            f"Cleanup did not complete. Removed {result.get('removed', 0)} originals.\n{details}"
+        )
+
+    console.print(
+        f"[bold green]Removed {result['removed']} verified originals and reclaimed "
+        f"approximately {reclaim_text}.[/bold green]"
+    )
 
 
 @cli.command()

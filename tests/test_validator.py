@@ -2,6 +2,10 @@
 
 import struct
 from pathlib import Path
+from rekordbox_compatibility_converter.core.pdb_manager import (
+    PDBManager,
+    TRACK_FILE_TYPE_OFFSET,
+)
 from rekordbox_compatibility_converter.core.validator import ExportValidator
 from tests.test_engine import mock_usb
 from tests.test_pdb import create_minimal_pdb
@@ -15,6 +19,20 @@ def test_validator_on_mock_usb(mock_usb: Path):
     assert report.passed_tracks == 1
     assert report.failed_tracks == 0
     assert len(report.issues) == 0
+
+
+def test_validator_rejects_file_type_that_disagrees_with_extension(mock_usb: Path):
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    manager = PDBManager(pdb_path)
+    track = manager.tracks[0]
+    row_base = track.page_idx * manager.len_page + track.row_offset
+    struct.pack_into("<H", manager.data, row_base + TRACK_FILE_TYPE_OFFSET, 0x0C)
+    manager.save(backup=False)
+
+    report = ExportValidator().validate(mock_usb)
+
+    assert report.failed_tracks == 1
+    assert any("file type does not match .flac" in issue.message for issue in report.issues)
 
 
 def test_validator_rejects_bogus_audio_and_invalid_anlz(tmp_path: Path):

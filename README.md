@@ -5,7 +5,7 @@
 
 A cross-platform CLI and desktop GUI for checking an exported Rekordbox USB and converting incompatible audio to CDJ/XDJ-compatible AIFF, WAV, or MP3.
 
-The converter updates the DeviceSQL `PIONEER/rekordbox/export.pdb` database and referenced `ANLZxxxx.DAT`/`.EXT` analysis paths. It stages output under unique temporary names, refuses target collisions and unsafe paths, commits each database update durably, and only then removes the original audio when requested.
+The converter updates the DeviceSQL `PIONEER/rekordbox/export.pdb` database—including its audio-format code—and referenced `ANLZxxxx.DAT`/`.EXT` analysis paths. It stages output under unique temporary names, refuses target collisions and unsafe paths, commits each database update durably, and only then removes the original audio when requested.
 
 ## Why it exists
 
@@ -20,10 +20,11 @@ Manual conversion breaks the paths stored in Rekordbox's exported database and a
 - Distinguishes AAC from ALAC inside ambiguous `.m4a` containers with `ffprobe`.
 - Updates `export.pdb` filenames, paths, sizes, sample rates, bit depths, and bitrates.
 - Updates PPTH paths in referenced ANLZ `.DAT` and `.EXT` files.
-- Verifies that audio is decodable and agrees with database metadata.
+- Verifies that audio is decodable and that its extension, DeviceSQL format code, sample rate, bit depth, and size agree with database metadata.
 - Detects missing, malformed, or mismatched ANLZ paths.
 - Removes AppleDouble (`._*`) and `.DS_Store` files when enabled.
 - Checks fresh free-space availability for worst-case parallel staging and backups.
+- Safely identifies and removes originals retained until a OneLibrary rebuild is verified.
 - Refuses collisions, paths outside the selected USB, missing sidecars, and unsupported OneLibrary exports before conversion starts.
 
 ## Compatibility profiles
@@ -84,15 +85,25 @@ Examples:
 
 ```bash
 uv run rbconvert convert /Volumes/YOUR_USB --profile maximum --yes
-uv run rbconvert convert /Volumes/YOUR_USB --format mp3 --threads 8 --yes
+uv run rbconvert convert /Volumes/YOUR_USB --format mp3 --threads 1 --yes
 uv run rbconvert convert /Volumes/YOUR_USB --keep-originals --yes
 uv run rbconvert convert /Volumes/YOUR_USB --yes --eject
 ```
+
+Conversion defaults to 2 parallel workers. USB flash drives often become slower with high
+parallelism because source reads and converted-file writes compete on the same device.
 
 Verify actual audio, database metadata, profile compatibility, and ANLZ references:
 
 ```bash
 uv run rbconvert verify /Volumes/YOUR_USB --profile standard
+```
+
+After completing and verifying Rekordbox's OneLibrary rebuild, reclaim the space used by
+retained originals:
+
+```bash
+uv run rbconvert cleanup-originals /Volumes/YOUR_USB
 ```
 
 List detected drives and profiles:
@@ -141,12 +152,13 @@ Test this only on a complete copy of a USB:
 3. Open the USB in the latest Rekordbox. Do not export or synchronize other content first.
 4. Under **Devices**, right-click **OneLibrary** and choose **Convert from Device Library**. In Rekordbox 6, the menu is named **Device Library Plus**. Accept the overwrite warnings.
 5. Inspect the USB's OneLibrary view and verify the converted tracks before using the USB on equipment.
+6. Return to the converter and click **Remove Retained Originals** to reclaim USB space. The cleanup verifies the pre-conversion database backup, every replacement file, current Device Library metadata, and ANLZ paths before asking for permanent-deletion confirmation.
 
 ```bash
 uv run rbconvert convert /Volumes/YOUR_USB --experimental-onelibrary-bridge
 ```
 
-The Rekordbox command overwrites the existing OneLibrary. AlphaTheta warns that playlists or playback histories stored only in OneLibrary will be lost. The originals are deliberately left on the USB so the existing OneLibrary links remain valid until the rebuild succeeds. Remove those originals only after independently verifying the rebuilt OneLibrary; automated cleanup is not implemented yet.
+The Rekordbox command overwrites the existing OneLibrary. AlphaTheta warns that playlists or playback histories stored only in OneLibrary will be lost. The originals are deliberately left on the USB so the existing OneLibrary links remain valid until the rebuild succeeds. Cleanup remains disabled until OneLibrary appears newer than the converted Device Library and still requires the user to confirm that the converted tracks were inspected in Rekordbox; this app cannot parse OneLibrary's opaque contents directly.
 
 ## Development and tests
 

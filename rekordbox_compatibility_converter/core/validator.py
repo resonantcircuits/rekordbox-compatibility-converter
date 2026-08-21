@@ -7,6 +7,7 @@ from typing import Dict, List, Optional
 from .anlz_manager import ANLZManager
 from .audio_converter import AudioConverter
 from .dlp_manager import ONELIBRARY_PRESENT_MESSAGE
+from .models import REKORDBOX_FILE_TYPE_BY_EXTENSION
 from .pdb_manager import PDBManager
 from .profiles import HardwareProfile
 
@@ -112,6 +113,19 @@ class ExportValidator:
             track_has_issue = False
             rel_audio_path = track.file_path.lstrip("/")
             audio_abs = usb_root / rel_audio_path
+
+            expected_file_type = REKORDBOX_FILE_TYPE_BY_EXTENSION.get(ext)
+            if expected_file_type is not None and track.file_type != expected_file_type:
+                track_has_issue = True
+                report.issues.append(
+                    ValidationIssue(
+                        track.id,
+                        track.title or track.filename,
+                        "ERROR",
+                        f"Device Library file type does not match .{ext}: expected "
+                        f"0x{expected_file_type:02x}, found 0x{track.file_type:02x}.",
+                    )
+                )
 
             if PurePosixPath(track.file_path).name != track.filename:
                 track_has_issue = True

@@ -4,7 +4,10 @@ import struct
 from pathlib import Path
 import pytest
 from rekordbox_compatibility_converter.core.models import TrackInfo
-from rekordbox_compatibility_converter.core.pdb_manager import PDBManager
+from rekordbox_compatibility_converter.core.pdb_manager import (
+    PDBManager,
+    TRACK_FILE_TYPE_OFFSET,
+)
 
 
 def create_minimal_pdb(
@@ -13,6 +16,7 @@ def create_minimal_pdb(
     filename: str = "song.flac",
     filepath: str = "/Contents/song.flac",
     analyze_path: str = "",
+    file_type: int = 0x05,
 ) -> Path:
     """Creates a valid, minimal DeviceSQL export.pdb for testing."""
     len_page = 4096
@@ -48,6 +52,7 @@ def create_minimal_pdb(
     struct.pack_into("<I", page1, row_base + 0x48, track_id)
     struct.pack_into("<H", page1, row_base + 0x52, sample_depth)
     struct.pack_into("<H", page1, row_base + 0x54, duration)
+    struct.pack_into("<H", page1, row_base + TRACK_FILE_TYPE_OFFSET, file_type)
 
     # Encode strings in heap after row fixed struct (0x88 bytes)
     # Title at row_base + 0x88
@@ -111,6 +116,7 @@ def test_pdb_parse_and_update(tmp_path: Path):
     assert track.sample_rate == 44100
     assert track.sample_depth == 16
     assert track.file_size == 50000000
+    assert track.file_type == 0x05
 
     # Update track to song.aiff
     mgr.update_track(
@@ -121,6 +127,7 @@ def test_pdb_parse_and_update(tmp_path: Path):
         new_sample_rate=44100,
         new_sample_depth=16,
         new_bitrate=1411200,
+        new_file_type=0x0C,
     )
     mgr.save(backup=False)
 
@@ -131,6 +138,7 @@ def test_pdb_parse_and_update(tmp_path: Path):
     assert t2.filename == "song.aiff"
     assert t2.file_path == "/Contents/song.aiff"
     assert t2.file_size == 60000000
+    assert t2.file_type == 0x0C
 
 
 def test_pdb_refuses_growing_string(tmp_path: Path):
@@ -150,17 +158,31 @@ def test_pdb_refuses_growing_string(tmp_path: Path):
         new_sample_rate=44100,
         new_sample_depth=16,
         new_bitrate=1411200,
+        new_file_type=0x0C,
     )
     assert ok is False
     assert bytes(mgr.data) == data_before
 
     # Same-length and shorter replacements still succeed
     assert mgr.can_fit_strings(track, "song.aiff"[:8], "/Contents/song.aiff"[:18]) is True
-    assert mgr.update_track(track, "song.mp3", "/Contents/song.mp3", 1, 44100, 16, 320000) is True
+    assert (
+        mgr.update_track(
+            track,
+            "song.mp3",
+            "/Contents/song.mp3",
+            1,
+            44100,
+            16,
+            320000,
+            0x01,
+        )
+        is True
+    )
     mgr.save(backup=False)
     t2 = PDBManager(pdb_path).tracks[0]
     assert t2.filename == "song.mp3"
     assert t2.file_path == "/Contents/song.mp3"
+    assert t2.file_type == 0x01
 
 
 def test_pdb_rejects_string_allocation_outside_page(tmp_path: Path):
@@ -233,9 +255,11 @@ def test_pdb_unicode_path_roundtrip(tmp_path: Path):
         44100,
         16,
         1411200,
+        0x0C,
     )
     mgr.save(backup=False)
 
     updated = PDBManager(pdb_path).tracks[0]
     assert updated.filename == "Beyoncé.aiff"
     assert updated.file_path == "/Contents/Beyoncé.aiff"
+    assert updated.file_type == 0x0C

@@ -20,12 +20,18 @@ from .dlp_manager import (
 )
 from .models import (
     ConversionTask,
+    OriginalCleanupCandidate,
+    OriginalCleanupPlan,
+    REKORDBOX_FILE_TYPE_BY_EXTENSION,
+    REKORDBOX_FILE_TYPE_BY_TARGET,
     ScanSummary,
     TargetFormat,
     TrackInfo,
 )
 from .pdb_manager import PDBManager
 from .profiles import HardwareProfile, get_profile
+
+DEFAULT_CONVERSION_THREADS = 2
 
 
 class ConversionEngine:
@@ -245,6 +251,18 @@ class ConversionEngine:
                     if anlz_ext_candidate.exists():
                         anlz_ext = anlz_ext_candidate
 
+                source_size_at_scan = None
+                source_mtime_ns_at_scan = None
+                try:
+                    if source_abs.is_file():
+                        source_stat = source_abs.stat()
+                        source_size_at_scan = source_stat.st_size
+                        source_mtime_ns_at_scan = source_stat.st_mtime_ns
+                except OSError:
+                    # Preflight reports a missing or unreadable source before
+                    # any conversion work begins.
+                    pass
+
                 task = ConversionTask(
                     track=track,
                     source_abs_path=source_abs,
@@ -256,6 +274,8 @@ class ConversionEngine:
                     target_sample_depth=target_sd,
                     anlz_dat_path=anlz_dat,
                     anlz_ext_path=anlz_ext,
+                    source_size_at_scan=source_size_at_scan,
+                    source_mtime_ns_at_scan=source_mtime_ns_at_scan,
                 )
                 summary.tasks.append(task)
                 if track.duration > 0:
@@ -267,6 +287,309 @@ class ConversionEngine:
 
         summary.required_space_bytes = self.estimate_required_space(summary, backup=True)
         return summary
+
+    def plan_retained_original_cleanup(self, usb_root: Path) -> OriginalCleanupPlan:
+        """Build a verified plan for removing originals retained by bridge conversion."""
+        usb_root = Path(usb_root).resolve()
+        plan = OriginalCleanupPlan(usb_root=usb_root)
+        pdb_path = usb_root / "PIONEER" / "rekordbox" / "export.pdb"
+        backup_path = usb_root / "PIONEER" / "rekordbox" / "export.pdb.bak"
+        dlp_paths = (
+            usb_root / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
+            usb_root / "PIONEER" / "rekordbox" / "exportLibrary.db",
+        )
+        plan.onelibrary_path = next((path for path in dlp_paths if path.is_file()), None)
+        plan.has_onelibrary = plan.onelibrary_path is not None
+        if not plan.onelibrary_path:
+            plan.errors.append(
+                "OneLibrary was not found. This cleanup is only available after the guarded "
+                "OneLibrary bridge workflow."
+            )
+        elif not self._is_within(usb_root, plan.onelibrary_path):
+            plan.errors.append("OneLibrary resolves outside the selected USB root.")
+
+        for label, path in (
+            ("current export.pdb", pdb_path),
+            ("pre-conversion export.pdb backup", backup_path),
+        ):
+            if not self._is_within(usb_root, path):
+                plan.errors.append(f"Unsafe {label} path resolves outside the selected USB.")
+            elif not path.is_file():
+                plan.errors.append(f"Missing {label}: {path}")
+        if plan.errors:
+            return plan
+
+        try:
+            current_manager = PDBManager(pdb_path)
+            backup_manager = PDBManager(backup_path)
+        except Exception as exc:
+            plan.errors.append(f"Could not read Device Library databases: {exc}")
+            return plan
+
+        plan.current_pdb_sha256 = hashlib.sha256(current_manager.data).hexdigest()
+        plan.backup_pdb_sha256 = hashlib.sha256(backup_manager.data).hexdigest()
+        current_by_id = {track.id: track for track in current_manager.tracks}
+        current_paths = {
+            PurePosixPath(track.file_path).as_posix().casefold()
+            for track in current_manager.tracks
+        }
+        seen_originals = set()
+        latest_replacement_mtime_ns = 0
+
+        for original_track in backup_manager.tracks:
+            replacement_track = current_by_id.get(original_track.id)
+            if not replacement_track or replacement_track.file_path == original_track.file_path:
+                continue
+
+            original_key = PurePosixPath(original_track.file_path).as_posix().casefold()
+            if original_key in seen_originals:
+                continue
+            seen_originals.add(original_key)
+
+            original = usb_root / original_track.file_path.lstrip("/")
+            replacement = usb_root / replacement_track.file_path.lstrip("/")
+            problem_prefix = f"Track {original_track.id} ({original_track.title or original_track.filename})"
+            original_path = PurePosixPath(original_track.file_path)
+            replacement_path = PurePosixPath(replacement_track.file_path)
+
+            if original_key in current_paths:
+                plan.errors.append(
+                    f"{problem_prefix}: retained original is still referenced by the current Device Library: "
+                    f"{original_track.file_path}"
+                )
+                continue
+            if (
+                original_path.parent != replacement_path.parent
+                or original_path.stem != replacement_path.stem
+                or replacement_track.extension not in {"aif", "aiff", "wav", "mp3"}
+            ):
+                plan.errors.append(
+                    f"{problem_prefix}: database paths are not an extension-only converter "
+                    "replacement; refusing to infer that the original is safe to remove."
+                )
+                continue
+            if not self._is_within(usb_root, original):
+                plan.errors.append(f"{problem_prefix}: original path escapes the USB root.")
+                continue
+            if not self._is_within(usb_root, replacement):
+                plan.errors.append(f"{problem_prefix}: replacement path escapes the USB root.")
+                continue
+            if not original.is_file():
+                continue
+            if PurePosixPath(replacement_track.file_path).name != replacement_track.filename:
+                plan.errors.append(
+                    f"{problem_prefix}: replacement filename and database path disagree."
+                )
+                continue
+            if not replacement.is_file():
+                plan.errors.append(
+                    f"{problem_prefix}: converted replacement is missing: {replacement_track.file_path}"
+                )
+                continue
+
+            replacement_stat = replacement.stat()
+            if replacement_track.file_size and replacement_stat.st_size != replacement_track.file_size:
+                plan.errors.append(
+                    f"{problem_prefix}: converted replacement size does not match Device Library "
+                    f"({replacement_track.file_size} bytes in database, {replacement_stat.st_size} on disk)."
+                )
+                continue
+
+            probe = self.audio_converter.probe(replacement)
+            if probe.get("probe_error"):
+                plan.errors.append(
+                    f"{problem_prefix}: converted replacement cannot be decoded: {probe['probe_error']}"
+                )
+                continue
+            expected_codecs = {
+                "aif": {"pcm_s16be", "pcm_s24be"},
+                "aiff": {"pcm_s16be", "pcm_s24be"},
+                "wav": {"pcm_s16le", "pcm_s24le"},
+                "mp3": {"mp3"},
+            }
+            actual_codec = str(probe.get("codec_name") or "").lower()
+            if actual_codec not in expected_codecs[replacement_track.extension]:
+                plan.errors.append(
+                    f"{problem_prefix}: replacement codec '{actual_codec or 'unknown'}' does not "
+                    f"match its .{replacement_track.extension} extension."
+                )
+                continue
+            expected_file_type = REKORDBOX_FILE_TYPE_BY_EXTENSION[
+                replacement_track.extension
+            ]
+            if replacement_track.file_type != expected_file_type:
+                plan.errors.append(
+                    f"{problem_prefix}: Device Library file type does not match the "
+                    f".{replacement_track.extension} replacement "
+                    f"(expected 0x{expected_file_type:02x}, found "
+                    f"0x{replacement_track.file_type:02x})."
+                )
+                continue
+            actual_rate = int(probe.get("sample_rate") or 0)
+            if actual_rate and actual_rate != replacement_track.sample_rate:
+                plan.errors.append(
+                    f"{problem_prefix}: replacement sample rate does not match Device Library "
+                    f"({replacement_track.sample_rate} Hz in database, {actual_rate} Hz in file)."
+                )
+                continue
+            if replacement_track.extension != "mp3":
+                actual_depth = int(probe.get("bits_per_sample") or 0)
+                if actual_depth and actual_depth != replacement_track.sample_depth:
+                    plan.errors.append(
+                        f"{problem_prefix}: replacement bit depth does not match Device Library "
+                        f"({replacement_track.sample_depth}-bit in database, "
+                        f"{actual_depth}-bit in file)."
+                    )
+                    continue
+
+            if replacement_track.analyze_path:
+                anlz_dat = usb_root / replacement_track.analyze_path.lstrip("/")
+                if not self._is_within(usb_root, anlz_dat) or not anlz_dat.is_file():
+                    plan.errors.append(
+                        f"{problem_prefix}: required ANLZ .DAT file is missing or unsafe."
+                    )
+                    continue
+                if ANLZManager.read_path(anlz_dat) != replacement_track.file_path:
+                    plan.errors.append(
+                        f"{problem_prefix}: ANLZ .DAT still references the old audio path."
+                    )
+                    continue
+                anlz_ext = anlz_dat.with_suffix(".EXT")
+                if anlz_ext.is_file() and ANLZManager.read_path(anlz_ext) != replacement_track.file_path:
+                    plan.errors.append(
+                        f"{problem_prefix}: ANLZ .EXT still references the old audio path."
+                    )
+                    continue
+
+            original_stat = original.stat()
+            plan.candidates.append(
+                OriginalCleanupCandidate(
+                    track_id=original_track.id,
+                    track_title=original_track.title or original_track.filename,
+                    original_usb_path=original_track.file_path,
+                    original_abs_path=original,
+                    replacement_usb_path=replacement_track.file_path,
+                    replacement_abs_path=replacement,
+                    original_size=original_stat.st_size,
+                    original_mtime_ns=original_stat.st_mtime_ns,
+                    replacement_size=replacement_stat.st_size,
+                    replacement_mtime_ns=replacement_stat.st_mtime_ns,
+                )
+            )
+            plan.total_bytes += original_stat.st_size
+            latest_replacement_mtime_ns = max(
+                latest_replacement_mtime_ns,
+                replacement_stat.st_mtime_ns,
+            )
+
+        if not plan.candidates and not plan.errors:
+            plan.errors.append(
+                "No retained originals with verified converted replacements were found."
+            )
+
+        if plan.onelibrary_path:
+            # A strictly newer OneLibrary file is evidence that Rekordbox
+            # performed Step 2. Equal timestamps are intentionally rejected:
+            # FAT timestamp rounding must not make a pre-conversion database
+            # look rebuilt. The opaque contents still require explicit visual
+            # verification by the user.
+            onelibrary_data = plan.onelibrary_path.read_bytes()
+            plan.onelibrary_sha256 = hashlib.sha256(onelibrary_data).hexdigest()
+            plan.onelibrary_mtime_ns = plan.onelibrary_path.stat().st_mtime_ns
+            plan.onelibrary_rebuild_observed = (
+                plan.onelibrary_mtime_ns > latest_replacement_mtime_ns
+            )
+            if not plan.onelibrary_rebuild_observed:
+                plan.errors.append(
+                    "OneLibrary does not appear to have been rebuilt after conversion. In Rekordbox, "
+                    "run OneLibrary > Convert from Device Library, verify the converted tracks, then "
+                    "prepare cleanup again."
+                )
+            else:
+                plan.warnings.append(
+                    "OneLibrary was modified after conversion, but its opaque contents cannot be "
+                    "verified by this app. Confirm the converted tracks in Rekordbox before deleting originals."
+                )
+
+        return plan
+
+    def cleanup_retained_originals(self, plan: OriginalCleanupPlan) -> dict:
+        """Permanently remove every verified original in a fresh cleanup plan."""
+        if plan.errors:
+            return {
+                "success": False,
+                "error": "Cleanup plan contains errors; no originals were removed.",
+                "errors": list(plan.errors),
+                "removed": 0,
+                "failed": len(plan.candidates),
+                "freed_bytes": 0,
+            }
+
+        fresh = self.plan_retained_original_cleanup(plan.usb_root)
+        expected_candidates = {
+            (
+                candidate.track_id,
+                candidate.original_usb_path,
+                candidate.replacement_usb_path,
+                candidate.original_size,
+                candidate.original_mtime_ns,
+                candidate.replacement_size,
+                candidate.replacement_mtime_ns,
+            )
+            for candidate in plan.candidates
+        }
+        fresh_candidates = {
+            (
+                candidate.track_id,
+                candidate.original_usb_path,
+                candidate.replacement_usb_path,
+                candidate.original_size,
+                candidate.original_mtime_ns,
+                candidate.replacement_size,
+                candidate.replacement_mtime_ns,
+            )
+            for candidate in fresh.candidates
+        }
+        if (
+            fresh.errors
+            or fresh.current_pdb_sha256 != plan.current_pdb_sha256
+            or fresh.backup_pdb_sha256 != plan.backup_pdb_sha256
+            or fresh.onelibrary_sha256 != plan.onelibrary_sha256
+            or fresh.onelibrary_mtime_ns != plan.onelibrary_mtime_ns
+            or fresh_candidates != expected_candidates
+        ):
+            errors = list(fresh.errors)
+            if not errors:
+                errors.append("The USB changed after cleanup was prepared. Prepare cleanup again.")
+            return {
+                "success": False,
+                "error": "Cleanup preflight changed; no originals were removed.",
+                "errors": errors,
+                "removed": 0,
+                "failed": len(plan.candidates),
+                "freed_bytes": 0,
+            }
+
+        removed = 0
+        freed_bytes = 0
+        errors = []
+        for candidate in plan.candidates:
+            try:
+                candidate.original_abs_path.unlink()
+                self._sync_directory(candidate.original_abs_path.parent)
+                removed += 1
+                freed_bytes += candidate.original_size
+            except OSError as exc:
+                errors.append(f"Could not remove {candidate.original_usb_path}: {exc}")
+
+        return {
+            "success": not errors,
+            "error": "Some retained originals could not be removed." if errors else "",
+            "errors": errors,
+            "removed": removed,
+            "failed": len(errors),
+            "freed_bytes": freed_bytes,
+        }
 
     def clean_dotfiles(self, usb_root: Path) -> int:
         """Removes hidden AppleDouble (._*) and .DS_Store ghost files from the USB drive.
@@ -419,7 +742,7 @@ class ConversionEngine:
         summary: ScanSummary,
         delete_original: bool = True,
         backup: bool = True,
-        threads: int = 4,
+        threads: int = DEFAULT_CONVERSION_THREADS,
         clean_dotfiles: bool = True,
         progress_callback: Optional[Callable[[ConversionTask, int, int], None]] = None,
         allow_onelibrary_bridge: bool = False,
@@ -511,10 +834,22 @@ class ConversionEngine:
                     "Database filename and file path disagree: "
                     f"'{task.track.filename}' vs '{task.track.file_path}'"
                 )
-            elif task.track.file_size and source.stat().st_size != task.track.file_size:
+            elif (
+                task.source_size_at_scan is not None
+                and source.stat().st_size != task.source_size_at_scan
+            ):
                 task.error = (
-                    f"Source file changed after export or scan: {source} "
-                    f"(database {task.track.file_size} bytes, disk {source.stat().st_size} bytes)"
+                    f"Source file changed since this scan: {source} "
+                    f"(scanned {task.source_size_at_scan} bytes, "
+                    f"now {source.stat().st_size} bytes). Scan the drive again before converting."
+                )
+            elif (
+                task.source_mtime_ns_at_scan is not None
+                and source.stat().st_mtime_ns != task.source_mtime_ns_at_scan
+            ):
+                task.error = (
+                    f"Source file changed since this scan: {source} "
+                    "(modification time changed). Scan the drive again before converting."
                 )
             elif task.target_sample_rate <= 0:
                 task.error = f"Invalid target sample rate: {task.target_sample_rate}"
@@ -663,6 +998,7 @@ class ConversionEngine:
                 "sample_rate": task.track.sample_rate,
                 "sample_depth": task.track.sample_depth,
                 "bitrate": task.track.bitrate,
+                "file_type": task.track.file_type,
             }
             anlz_snapshots: Dict[Path, bytes] = {}
             updated_anlz_paths = 0
@@ -713,6 +1049,7 @@ class ConversionEngine:
                     new_sample_rate=actual_rate,
                     new_sample_depth=actual_depth,
                     new_bitrate=new_bitrate,
+                    new_file_type=REKORDBOX_FILE_TYPE_BY_TARGET[task.target_format],
                 ):
                     raise RuntimeError("export.pdb patch rejected the replacement strings")
 

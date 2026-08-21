@@ -1,6 +1,5 @@
 """Modern, sleek Dark/Light mode GUI using CustomTkinter with dynamic theme styling."""
 
-import os
 import threading
 from pathlib import Path
 from typing import Dict, Optional
@@ -14,8 +13,13 @@ from ..core.dlp_manager import (
     ONELIBRARY_BRIDGE_PROMPT,
     ONELIBRARY_REBUILD_REQUIRED_MESSAGE,
 )
-from ..core.engine import ConversionEngine
-from ..core.models import CompatibilityProfileType, ScanSummary, TargetFormat
+from ..core.engine import DEFAULT_CONVERSION_THREADS, ConversionEngine
+from ..core.models import (
+    CompatibilityProfileType,
+    OriginalCleanupPlan,
+    ScanSummary,
+    TargetFormat,
+)
 from ..core.usb_detector import USBDetector
 from ..core.profiles import get_profile
 
@@ -46,12 +50,15 @@ class ModernRekordboxGUI(ctk.CTk):
         self.engine = ConversionEngine()
         self.summary: Optional[ScanSummary] = None
         self.is_converting = False
+        self.is_cleanup_running = False
+        self.cleanup_previous_convert_state = "disabled"
         self.is_scanning = False
         self.scan_generation = 0
         self.drive_map: Dict[str, Path] = {}
 
         self._build_ui()
         self._apply_treeview_theme("dark")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._refresh_drives()
 
     # ------------------------------------------------------------------ theming
@@ -243,7 +250,7 @@ class ModernRekordboxGUI(ctk.CTk):
         threads_box = ctk.CTkFrame(settings, fg_color="transparent")
         threads_box.grid(row=1, column=2, sticky="w", padx=(24, 0), pady=(4, 0))
         self.threads_slider = ctk.CTkSlider(threads_box, from_=1, to=16, number_of_steps=15, width=140)
-        self.threads_slider.set(min(8, os.cpu_count() or 4))
+        self.threads_slider.set(DEFAULT_CONVERSION_THREADS)
         self.threads_slider.pack(side="left")
         self.threads_lbl = ctk.CTkLabel(
             threads_box,
@@ -359,6 +366,21 @@ class ModernRekordboxGUI(ctk.CTk):
         )
         self.btn_restore.pack(side="right")
 
+        self.btn_cleanup = ctk.CTkButton(
+            action_bar,
+            text="Remove Retained Originals",
+            font=ctk.CTkFont(size=13),
+            fg_color="transparent",
+            border_width=1,
+            border_color=("#9A6700", "#B78103"),
+            hover_color=("#F3E8C8", "#3B2F12"),
+            text_color=("#6B4700", "#F0C36A"),
+            height=40,
+            corner_radius=8,
+            command=self._start_original_cleanup,
+        )
+        self.btn_cleanup.pack(side="right", padx=(0, 10))
+
         # 6. Track Table (takes all remaining vertical space)
         table_card = ctk.CTkFrame(self, corner_radius=12, border_width=1, border_color=CARD_BORDER)
         table_card.pack(side="top", fill="both", expand=True, padx=24, pady=(4, 0))
@@ -413,11 +435,19 @@ class ModernRekordboxGUI(ctk.CTk):
 
     def _on_profile_changed(self, choice: str):
         self.lbl_profile_desc.configure(text=PROFILE_DESCRIPTIONS.get(choice, ""))
-        if not self.is_converting and (self.summary or self.is_scanning):
+        if (
+            not self.is_converting
+            and not self.is_cleanup_running
+            and (self.summary or self.is_scanning)
+        ):
             self._start_scan()
 
     def _on_format_changed(self, _choice: str):
-        if not self.is_converting and (self.summary or self.is_scanning):
+        if (
+            not self.is_converting
+            and not self.is_cleanup_running
+            and (self.summary or self.is_scanning)
+        ):
             self._start_scan()
 
     def _set_conversion_controls(self, enabled: bool):
@@ -440,6 +470,16 @@ class ModernRekordboxGUI(ctk.CTk):
             self.del_switch.configure(state="disabled")
             self.backup_switch.select()
             self.backup_switch.configure(state="disabled")
+
+    def _on_close(self):
+        if self.is_converting or self.is_cleanup_running:
+            messagebox.showwarning(
+                "USB Operation in Progress",
+                "A USB operation is still running. Keep this window open and do not eject the "
+                "USB until the completion message appears.",
+            )
+            return
+        self.destroy()
 
     def _refresh_drives(self):
         detected = USBDetector.list_rekordbox_drives()
@@ -476,6 +516,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self.is_scanning = False
         self.summary = None
         self.btn_scan.configure(state="normal")
+        self.btn_cleanup.configure(state="normal")
         self.btn_convert.configure(
             state="disabled",
             text="Convert Incompatible Tracks",
@@ -511,6 +552,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self.lbl_status.configure(text="Scanning database...")
         self.tree.delete(*self.tree.get_children())
         self.btn_scan.configure(state="disabled")
+        self.btn_cleanup.configure(state="disabled")
         self.btn_convert.configure(
             state="disabled",
             text=(
@@ -551,12 +593,14 @@ class ModernRekordboxGUI(ctk.CTk):
             return
         self.is_scanning = False
         self.btn_scan.configure(state="normal")
+        self.btn_cleanup.configure(state="normal")
         self.lbl_status.configure(text="Scan failed.")
         messagebox.showerror("Scan Failed", f"Could not read the Rekordbox database:\n{msg}")
 
     def _render_scan(self):
         self.is_scanning = False
         self.btn_scan.configure(state="normal")
+        self.btn_cleanup.configure(state="normal")
         if not self.summary:
             return
         if self.summary.has_dlp and not self.summary.onelibrary_bridge_mode:
@@ -669,6 +713,24 @@ class ModernRekordboxGUI(ctk.CTk):
 
     # ------------------------------------------------------------------ convert
 
+    def _show_conversion_started(self, total: int):
+        """Make background conversion activity visible before work begins."""
+        self.btn_convert.configure(
+            state="disabled",
+            text=f"Converting 0 of {total}...",
+        )
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.set(0)
+        self.progress_bar.start()
+        self.lbl_status.configure(
+            text=(
+                f"Conversion started — 0 of {total} tracks complete. "
+                "Validating files and preparing backups; do not eject the USB."
+            )
+        )
+        self.update_idletasks()
+
     def _start_conversion(self):
         if not self.summary or not self.summary.tasks:
             return
@@ -704,17 +766,22 @@ class ModernRekordboxGUI(ctk.CTk):
 
         self.is_converting = True
         self.btn_scan.configure(state="disabled")
-        self.btn_convert.configure(state="disabled")
         self.btn_restore.configure(state="disabled")
+        self.btn_cleanup.configure(state="disabled")
         self._set_conversion_controls(False)
-        self.progress_bar.set(0)
+        self._show_conversion_started(len(conversion_summary.tasks))
 
         def run():
             try:
                 def on_prog(task, cur, total_count):
                     pct = cur / total_count
                     filename = task.track.filename
-                    self.after(0, lambda p=pct, n=filename: self._update_prog(p, n))
+                    self.after(
+                        0,
+                        lambda p=pct, n=filename, c=cur, t=total_count: self._update_prog(
+                            p, n, c, t
+                        ),
+                    )
 
                 result = self.engine.execute(
                     summary=conversion_summary,
@@ -736,15 +803,26 @@ class ModernRekordboxGUI(ctk.CTk):
 
         threading.Thread(target=run, daemon=True).start()
 
-    def _update_prog(self, pct: float, name: str):
+    def _update_prog(self, pct: float, name: str, current: int, total: int):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
         self.progress_bar.set(pct)
-        self.lbl_status.configure(text=f"Converting: {name[:45]}...")
+        self.btn_convert.configure(text=f"Converting {current} of {total}...")
+        self.lbl_status.configure(
+            text=(
+                f"Conversion in progress — {current} of {total} tracks processed. "
+                f"Latest: {name[:45]}. Do not eject the USB."
+            )
+        )
 
     def _on_conversion_error(self, msg: str):
         self.is_converting = False
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
         self._set_conversion_controls(True)
         self.btn_scan.configure(state="normal")
         self.btn_restore.configure(state="normal")
+        self.btn_cleanup.configure(state="normal")
         self.lbl_status.configure(text="Conversion failed.")
         messagebox.showerror("Conversion Failed", f"An unexpected error occurred:\n{msg}")
 
@@ -752,9 +830,12 @@ class ModernRekordboxGUI(ctk.CTk):
         self, result: dict, conversion_summary: ScanSummary, delete_original: bool
     ):
         self.is_converting = False
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
         self._set_conversion_controls(True)
         self.btn_scan.configure(state="normal")
         self.btn_restore.configure(state="normal")
+        self.btn_cleanup.configure(state="normal")
         self.progress_bar.set(1.0)
 
         if result.get("success"):
@@ -832,6 +913,150 @@ class ModernRekordboxGUI(ctk.CTk):
             self.backup_switch.configure(state="normal")
             return
         self._start_scan()
+
+    # ----------------------------------------------------- retained originals
+
+    def _set_cleanup_busy(self, busy: bool):
+        self.is_cleanup_running = busy
+        state = "disabled" if busy else "normal"
+        self.btn_scan.configure(state=state)
+        self.btn_restore.configure(state=state)
+        self.btn_cleanup.configure(state=state)
+        self._set_conversion_controls(not busy)
+        if busy:
+            self.btn_convert.configure(state="disabled")
+        else:
+            self.btn_convert.configure(
+                state=(
+                    self.cleanup_previous_convert_state
+                    if self.summary is not None
+                    else "disabled"
+                )
+            )
+
+    def _start_original_cleanup(self):
+        usb_path = self._get_selected_path()
+        if not usb_path.exists():
+            messagebox.showerror("Cleanup Unavailable", f"Path does not exist: {usb_path}")
+            return
+        if self.is_converting or self.is_scanning or self.is_cleanup_running:
+            return
+
+        self.cleanup_previous_convert_state = str(self.btn_convert.cget("state"))
+        self._set_cleanup_busy(True)
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.set(0)
+        self.progress_bar.start()
+        self.lbl_status.configure(
+            text="Checking retained originals and converted replacements; do not eject the USB."
+        )
+
+        def run():
+            try:
+                plan = self.engine.plan_retained_original_cleanup(usb_path)
+            except Exception as exc:
+                self.after(0, lambda m=str(exc): self._on_cleanup_error(m))
+                return
+            self.after(0, lambda p=plan: self._confirm_original_cleanup(p))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _confirm_original_cleanup(self, plan: OriginalCleanupPlan):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
+        if plan.errors:
+            self._set_cleanup_busy(False)
+            details = "\n".join(f"- {error}" for error in plan.errors[:4])
+            self.lbl_status.configure(text="Retained-original cleanup was not started.")
+            messagebox.showerror(
+                "Cleanup Safety Check Failed",
+                f"No files were removed.\n\n{details}",
+            )
+            return
+
+        gib = plan.total_bytes / (1024 ** 3)
+        mib = plan.total_bytes / (1024 ** 2)
+        space_text = f"{gib:.2f} GiB" if gib >= 1 else f"{mib:.1f} MiB"
+        confirmation = (
+            f"Permanently remove {len(plan.candidates)} retained original files and reclaim "
+            f"approximately {space_text}?\n\n"
+            "Continue only after all of these are true:\n"
+            "1. In Rekordbox, you ran OneLibrary > Convert from Device Library.\n"
+            "2. You opened OneLibrary on this USB and verified the converted tracks.\n"
+            "3. You have another copy of the original audio.\n\n"
+            "The app verified each replacement against Device Library and its ANLZ path. "
+            "This deletion cannot be undone, and database backups do not contain audio files."
+        )
+        if plan.warnings:
+            confirmation += f"\n\nImportant: {plan.warnings[0]}"
+        if not messagebox.askyesno(
+            "Remove Retained Originals",
+            confirmation,
+            default=messagebox.NO,
+        ):
+            self._set_cleanup_busy(False)
+            self.lbl_status.configure(text="Retained-original cleanup canceled; no files removed.")
+            return
+
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
+        self.lbl_status.configure(
+            text=f"Removing {len(plan.candidates)} verified originals; do not eject the USB."
+        )
+
+        def run():
+            try:
+                result = self.engine.cleanup_retained_originals(plan)
+            except Exception as exc:
+                self.after(0, lambda m=str(exc): self._on_cleanup_error(m))
+                return
+            self.after(0, lambda r=result: self._on_cleanup_finish(r))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_cleanup_error(self, message: str):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
+        self._set_cleanup_busy(False)
+        self.lbl_status.configure(text="Retained-original cleanup failed.")
+        messagebox.showerror("Cleanup Failed", f"No further files were removed.\n\n{message}")
+
+    def _on_cleanup_finish(self, result: dict):
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(1.0 if result.get("success") else 0)
+        if result.get("success"):
+            self.summary = None
+        self._set_cleanup_busy(False)
+
+        removed = int(result.get("removed", 0))
+        freed_bytes = int(result.get("freed_bytes", 0))
+        freed_gib = freed_bytes / (1024 ** 3)
+        freed_mib = freed_bytes / (1024 ** 2)
+        freed_text = f"{freed_gib:.2f} GiB" if freed_gib >= 1 else f"{freed_mib:.1f} MiB"
+        if result.get("success"):
+            self.lbl_status.configure(
+                text=f"Cleanup complete: removed {removed} originals and reclaimed {freed_text}."
+            )
+            messagebox.showinfo(
+                "Retained Originals Removed",
+                f"Removed {removed} verified original files and reclaimed approximately "
+                f"{freed_text}.\n\nThe converted files, Device Library, OneLibrary, and ANLZ "
+                "files were left in place. Safely eject the USB before using it.",
+            )
+            return
+
+        details = "\n".join(f"- {error}" for error in result.get("errors", [])[:4])
+        self.lbl_status.configure(
+            text=f"Cleanup incomplete: removed {removed}; {result.get('failed', 0)} failed."
+        )
+        messagebox.showerror(
+            "Cleanup Incomplete",
+            f"Removed: {removed}\nFailed: {result.get('failed', 0)}\n\n{details}",
+        )
 
     # ------------------------------------------------------------------ restore
 

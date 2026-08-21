@@ -2,13 +2,25 @@
 
 import subprocess
 import hashlib
+import inspect
+import os
 import struct
 from pathlib import Path
 import pytest
-from rekordbox_compatibility_converter.core.engine import ConversionEngine
+from rekordbox_compatibility_converter.core.engine import (
+    DEFAULT_CONVERSION_THREADS,
+    ConversionEngine,
+)
 from rekordbox_compatibility_converter.core.anlz_manager import ANLZManager
-from rekordbox_compatibility_converter.core.models import CompatibilityProfileType, TargetFormat
-from rekordbox_compatibility_converter.core.pdb_manager import PDBManager
+from rekordbox_compatibility_converter.core.models import (
+    CompatibilityProfileType,
+    REKORDBOX_FILE_TYPE_BY_TARGET,
+    TargetFormat,
+)
+from rekordbox_compatibility_converter.core.pdb_manager import (
+    PDBManager,
+    TRACK_FILE_TYPE_OFFSET,
+)
 from rekordbox_compatibility_converter.core.profiles import get_profile
 from rekordbox_compatibility_converter.core.validator import ExportValidator
 from tests.test_pdb import create_minimal_pdb
@@ -53,6 +65,13 @@ def mock_usb(tmp_path: Path) -> Path:
     create_minimal_anlz(anlz_dir, "/Contents/song.flac")
 
     return usb_dir
+
+
+def test_default_conversion_threads_are_usb_safe():
+    default = inspect.signature(ConversionEngine.execute).parameters["threads"].default
+
+    assert DEFAULT_CONVERSION_THREADS == 2
+    assert default == DEFAULT_CONVERSION_THREADS
 
 
 def test_engine_scan_and_execute_parallel(mock_usb: Path):
@@ -110,6 +129,38 @@ def test_engine_scan_and_execute_parallel(mock_usb: Path):
     assert (mock_usb / "PIONEER" / "rekordbox" / "export.pdb").exists()
 
 
+@pytest.mark.parametrize(
+    ("target_format", "target_extension"),
+    [
+        (TargetFormat.AIFF, "aiff"),
+        (TargetFormat.WAV, "wav"),
+        (TargetFormat.MP3, "mp3"),
+    ],
+)
+def test_engine_updates_device_sql_file_type_for_every_target(
+    mock_usb: Path,
+    target_format: TargetFormat,
+    target_extension: str,
+):
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb, forced_target_format=target_format)
+
+    result = engine.execute(
+        summary,
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+    )
+
+    assert result["success"] is True
+    track = PDBManager(
+        mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    ).tracks[0]
+    assert track.extension == target_extension
+    assert track.file_type == REKORDBOX_FILE_TYPE_BY_TARGET[target_format]
+
+
 def test_engine_refuses_existing_target_without_overwriting(mock_usb: Path):
     target = mock_usb / "Contents" / "song.aiff"
     target.write_bytes(b"existing user file")
@@ -132,7 +183,11 @@ def test_engine_rolls_back_database_when_anlz_update_fails(mock_usb: Path, monke
     assert result["success"] is False
     assert (mock_usb / "Contents" / "song.flac").exists()
     assert not (mock_usb / "Contents" / "song.aiff").exists()
-    assert PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb").tracks[0].file_path.endswith(".flac")
+    restored_track = PDBManager(
+        mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    ).tracks[0]
+    assert restored_track.file_path.endswith(".flac")
+    assert restored_track.file_type == 0x05
 
 
 def test_progress_callback_failure_does_not_interrupt_commit(mock_usb: Path):
@@ -230,6 +285,157 @@ def test_experimental_onelibrary_bridge_retains_originals_and_database(mock_usb:
     assert PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb").tracks[
         0
     ].file_path.endswith(".aiff")
+
+
+def _complete_onelibrary_bridge(mock_usb: Path):
+    dlp = mock_usb / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db"
+    dlp.parent.mkdir(parents=True, exist_ok=True)
+    dlp.write_bytes(b"OneLibrary before rebuild")
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb, allow_onelibrary_bridge=True),
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        allow_onelibrary_bridge=True,
+    )
+    assert result["success"] is True
+    return engine, dlp
+
+
+def _mark_onelibrary_rebuilt(mock_usb: Path, dlp: Path):
+    pdb = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    replacement = mock_usb / "Contents" / "song.aiff"
+    rebuilt_ns = max(pdb.stat().st_mtime_ns, replacement.stat().st_mtime_ns) + 4_000_000_000
+    dlp.write_bytes(b"OneLibrary rebuilt from Device Library")
+    os.utime(dlp, ns=(rebuilt_ns, rebuilt_ns))
+
+
+def test_cleanup_retained_originals_after_onelibrary_rebuild(mock_usb: Path):
+    engine, dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    unrelated = mock_usb / "Contents" / "unrelated.flac"
+    unrelated.write_bytes(b"not referenced by the conversion backup")
+    source_size = source.stat().st_size
+    _mark_onelibrary_rebuilt(mock_usb, dlp)
+
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+
+    assert plan.errors == []
+    assert plan.onelibrary_rebuild_observed is True
+    assert len(plan.candidates) == 1
+    assert plan.candidates[0].original_usb_path == "/Contents/song.flac"
+    assert plan.candidates[0].replacement_usb_path == "/Contents/song.aiff"
+    assert plan.total_bytes == source_size
+
+    result = engine.cleanup_retained_originals(plan)
+
+    assert result["success"] is True
+    assert result["removed"] == 1
+    assert result["freed_bytes"] == source_size
+    assert not source.exists()
+    assert unrelated.is_file()
+    assert (mock_usb / "Contents" / "song.aiff").is_file()
+
+
+def test_cleanup_refuses_before_onelibrary_rebuild(mock_usb: Path):
+    engine, _dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    result = engine.cleanup_retained_originals(plan)
+
+    assert plan.onelibrary_rebuild_observed is False
+    assert any("does not appear to have been rebuilt" in error for error in plan.errors)
+    assert result["success"] is False
+    assert source.is_file()
+
+
+def test_cleanup_refuses_without_onelibrary(mock_usb: Path):
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb),
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+    )
+    source = mock_usb / "Contents" / "song.flac"
+
+    assert result["success"] is True
+
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    cleanup_result = engine.cleanup_retained_originals(plan)
+
+    assert any("OneLibrary was not found" in error for error in plan.errors)
+    assert cleanup_result["success"] is False
+    assert source.is_file()
+
+
+def test_cleanup_refuses_stale_plan_when_original_changes(mock_usb: Path):
+    engine, dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    _mark_onelibrary_rebuilt(mock_usb, dlp)
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    source.write_bytes(source.read_bytes() + b"changed after cleanup plan")
+
+    result = engine.cleanup_retained_originals(plan)
+
+    assert result["success"] is False
+    assert result["removed"] == 0
+    assert source.is_file()
+
+
+def test_cleanup_refuses_stale_plan_when_onelibrary_changes(mock_usb: Path):
+    engine, dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    _mark_onelibrary_rebuilt(mock_usb, dlp)
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    changed_ns = dlp.stat().st_mtime_ns + 4_000_000_000
+    dlp.write_bytes(b"OneLibrary changed after cleanup preview")
+    os.utime(dlp, ns=(changed_ns, changed_ns))
+
+    result = engine.cleanup_retained_originals(plan)
+
+    assert result["success"] is False
+    assert result["removed"] == 0
+    assert source.is_file()
+
+
+def test_cleanup_refuses_missing_converted_replacement(mock_usb: Path):
+    engine, dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    _mark_onelibrary_rebuilt(mock_usb, dlp)
+    (mock_usb / "Contents" / "song.aiff").unlink()
+
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    result = engine.cleanup_retained_originals(plan)
+
+    assert any("converted replacement is missing" in error for error in plan.errors)
+    assert result["success"] is False
+    assert result["removed"] == 0
+    assert source.is_file()
+
+
+def test_cleanup_refuses_stale_device_sql_file_type(mock_usb: Path):
+    engine, dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    manager = PDBManager(pdb_path)
+    track = manager.tracks[0]
+    row_base = track.page_idx * manager.len_page + track.row_offset
+    struct.pack_into("<H", manager.data, row_base + TRACK_FILE_TYPE_OFFSET, 0x05)
+    manager.save(backup=False)
+    _mark_onelibrary_rebuilt(mock_usb, dlp)
+
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    result = engine.cleanup_retained_originals(plan)
+
+    assert any("file type does not match" in error for error in plan.errors)
+    assert result["success"] is False
+    assert result["removed"] == 0
+    assert source.is_file()
 
 
 def test_scan_uses_short_aif_extension_when_aiff_does_not_fit(tmp_path: Path):
@@ -413,6 +619,39 @@ def test_engine_rejects_stale_scan_plan(mock_usb: Path):
 
     assert result["success"] is False
     assert "changed after the scan" in result["error"]
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+
+
+def test_engine_allows_stale_database_file_size(mock_usb: Path):
+    pdb = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    data = bytearray(pdb.read_bytes())
+    source = mock_usb / "Contents" / "song.flac"
+    struct.pack_into("<I", data, 4096 + 0x28 + 0x10, source.stat().st_size + 4096)
+    pdb.write_bytes(data)
+    engine = ConversionEngine()
+
+    result = engine.execute(
+        engine.scan(mock_usb),
+        backup=False,
+        clean_dotfiles=False,
+        threads=1,
+    )
+
+    assert result["success"] is True
+    assert not source.exists()
+    assert (mock_usb / "Contents" / "song.aiff").is_file()
+
+
+def test_engine_rejects_source_changed_since_scan(mock_usb: Path):
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    source.write_bytes(source.read_bytes() + b"changed after scan")
+
+    result = engine.execute(summary, backup=False, clean_dotfiles=False, threads=1)
+
+    assert result["success"] is False
+    assert "changed since this scan" in result["preflight_errors"][0]
     assert not (mock_usb / "Contents" / "song.aiff").exists()
 
 

@@ -29,4 +29,6 @@ def test_onelibrary_completion_lists_exact_rekordbox_actions():
     assert "expand Devices" in ONELIBRARY_REBUILD_REQUIRED_MESSAGE
     assert "Right-click OneLibrary" in ONELIBRARY_REBUILD_REQUIRED_MESSAGE
     assert "Click Convert from Device Library" in ONELIBRARY_REBUILD_REQUIRED_MESSAGE
+    assert "Remove Retained Originals" in ONELIBRARY_REBUILD_REQUIRED_MESSAGE
+    assert "Never delete every FLAC file manually" in ONELIBRARY_REBUILD_REQUIRED_MESSAGE
     assert "Eject the USB safely" in ONELIBRARY_REBUILD_REQUIRED_MESSAGE

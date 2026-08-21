@@ -1,7 +1,7 @@
 """Data models for Rekordbox format checker and converter."""
 
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import Enum, IntEnum
 from pathlib import Path, PurePosixPath
 from typing import Dict, List, Optional
 
@@ -10,6 +10,36 @@ class TargetFormat(str, Enum):
     AIFF = "aiff"
     WAV = "wav"
     MP3 = "mp3"
+
+
+class RekordboxFileType(IntEnum):
+    """Audio format codes stored in DeviceSQL track rows."""
+
+    UNKNOWN = 0x00
+    MP3 = 0x01
+    M4A = 0x04
+    FLAC = 0x05
+    WAV = 0x0B
+    AIFF = 0x0C
+
+
+REKORDBOX_FILE_TYPE_BY_EXTENSION: Dict[str, RekordboxFileType] = {
+    "mp3": RekordboxFileType.MP3,
+    "m4a": RekordboxFileType.M4A,
+    "mp4": RekordboxFileType.M4A,
+    "flac": RekordboxFileType.FLAC,
+    "fla": RekordboxFileType.FLAC,
+    "wav": RekordboxFileType.WAV,
+    "wave": RekordboxFileType.WAV,
+    "aif": RekordboxFileType.AIFF,
+    "aiff": RekordboxFileType.AIFF,
+}
+
+REKORDBOX_FILE_TYPE_BY_TARGET: Dict[TargetFormat, RekordboxFileType] = {
+    TargetFormat.AIFF: RekordboxFileType.AIFF,
+    TargetFormat.WAV: RekordboxFileType.WAV,
+    TargetFormat.MP3: RekordboxFileType.MP3,
+}
 
 
 class CompatibilityProfileType(str, Enum):
@@ -31,6 +61,7 @@ class TrackInfo:
     sample_depth: int = 16
     bitrate: int = 1411200
     file_size: int = 0
+    file_type: int = RekordboxFileType.UNKNOWN
     duration: int = 0
     codec_name: str = ""
     channels: int = 2
@@ -66,11 +97,43 @@ class ConversionTask:
     target_sample_depth: int
     anlz_dat_path: Optional[Path] = None
     anlz_ext_path: Optional[Path] = None
+    source_size_at_scan: Optional[int] = None
+    source_mtime_ns_at_scan: Optional[int] = None
     status: str = "pending"
     new_file_size: int = 0
     output_probe: Dict = field(default_factory=dict)
     warnings: List[str] = field(default_factory=list)
     error: Optional[str] = None
+
+
+@dataclass
+class OriginalCleanupCandidate:
+    track_id: int
+    track_title: str
+    original_usb_path: str
+    original_abs_path: Path
+    replacement_usb_path: str
+    replacement_abs_path: Path
+    original_size: int
+    original_mtime_ns: int
+    replacement_size: int
+    replacement_mtime_ns: int
+
+
+@dataclass
+class OriginalCleanupPlan:
+    usb_root: Path
+    candidates: List[OriginalCleanupCandidate] = field(default_factory=list)
+    total_bytes: int = 0
+    has_onelibrary: bool = False
+    onelibrary_path: Optional[Path] = None
+    onelibrary_rebuild_observed: bool = False
+    onelibrary_sha256: str = ""
+    onelibrary_mtime_ns: int = 0
+    current_pdb_sha256: str = ""
+    backup_pdb_sha256: str = ""
+    errors: List[str] = field(default_factory=list)
+    warnings: List[str] = field(default_factory=list)
 
 
 @dataclass

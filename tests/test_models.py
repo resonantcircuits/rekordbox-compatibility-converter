@@ -2,11 +2,13 @@
 
 from pathlib import Path
 from rekordbox_compatibility_converter.core.models import (
-    TrackInfo,
-    TargetFormat,
     CompatibilityProfileType,
-    ScanSummary,
     ConversionTask,
+    REKORDBOX_FILE_TYPE_BY_EXTENSION,
+    RekordboxFileType,
+    ScanSummary,
+    TargetFormat,
+    TrackInfo,
 )
 
 
@@ -22,6 +24,29 @@ def test_track_info_extension():
 
     t4 = TrackInfo(id=4, filename="Track", file_path="/Contents/Artist.Name/Track")
     assert t4.extension == ""
+
+
+def test_all_known_device_sql_file_types_are_mapped():
+    assert REKORDBOX_FILE_TYPE_BY_EXTENSION == {
+        "mp3": RekordboxFileType.MP3,
+        "m4a": RekordboxFileType.M4A,
+        "mp4": RekordboxFileType.M4A,
+        "flac": RekordboxFileType.FLAC,
+        "fla": RekordboxFileType.FLAC,
+        "wav": RekordboxFileType.WAV,
+        "wave": RekordboxFileType.WAV,
+        "aif": RekordboxFileType.AIFF,
+        "aiff": RekordboxFileType.AIFF,
+    }
+    assert {
+        file_type for file_type in REKORDBOX_FILE_TYPE_BY_EXTENSION.values()
+    } == {
+        RekordboxFileType.MP3,
+        RekordboxFileType.M4A,
+        RekordboxFileType.FLAC,
+        RekordboxFileType.WAV,
+        RekordboxFileType.AIFF,
+    }
 
 
 def test_scan_summary():
