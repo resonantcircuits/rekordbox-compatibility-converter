@@ -22,6 +22,7 @@ Manual conversion breaks the paths stored in Rekordbox's exported database and a
 - Updates PPTH paths in referenced ANLZ `.DAT` and `.EXT` files.
 - Verifies that audio is decodable and that its extension, DeviceSQL format code, sample rate, bit depth, and size agree with database metadata.
 - Detects missing, malformed, or mismatched ANLZ paths.
+- Rejects DeviceSQL databases whose header sequence is inconsistent with their pages.
 - Removes AppleDouble (`._*`) and `.DS_Store` files when enabled.
 - Checks fresh free-space availability for worst-case parallel staging and backups.
 - Safely identifies and removes originals retained until a OneLibrary rebuild is verified.

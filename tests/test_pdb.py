@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from rekordbox_compatibility_converter.core.models import TrackInfo
 from rekordbox_compatibility_converter.core.pdb_manager import (
+    DATABASE_SEQUENCE_OFFSET,
+    PAGE_SEQUENCE_OFFSET,
     PDBManager,
     TRACK_FILE_TYPE_OFFSET,
 )
@@ -17,22 +19,34 @@ def create_minimal_pdb(
     filepath: str = "/Contents/song.flac",
     analyze_path: str = "",
     file_type: int = 0x05,
+    database_sequence: int = 48,
+    page_sequence: int = 47,
 ) -> Path:
     """Creates a valid, minimal DeviceSQL export.pdb for testing."""
     len_page = 4096
     num_tables = 1
-    seq_db = 1
 
     # Page 0: File Header
     page0 = bytearray(len_page)
-    struct.pack_into("<IIII", page0, 4, len_page, num_tables, 2, seq_db)
+    struct.pack_into(
+        "<IIIII",
+        page0,
+        4,
+        len_page,
+        num_tables,
+        2,
+        1,
+        database_sequence,
+    )
     # Table 0 (tracks): first_page=1, last_page=1
     struct.pack_into("<IIII", page0, 0x1C, 0, 0, 1, 1)
 
     # Page 1: Table 0 Data Page
     page1 = bytearray(len_page)
     # Page header
-    struct.pack_into("<IIIII", page1, 0, 0, 1, 0, 0, 1)  # gap, page_idx, type=0, next_page=0, seq=1
+    struct.pack_into(
+        "<IIIII", page1, 0, 0, 1, 0, 0, page_sequence
+    )  # gap, page_idx, type=0, next_page=0, sequence
     # Page flags & rows: 1 row offset, 1 row, flags=0x24 (data page)
     raw18 = (0x24 << 24) | (1 << 13) | 1
     struct.pack_into("<I", page1, 0x18, raw18)
@@ -109,6 +123,7 @@ def test_pdb_parse_and_update(tmp_path: Path):
 
     assert len(mgr.tracks) == 1
     track = mgr.tracks[0]
+    assert mgr.seq_db == 48
     assert track.id == 101
     assert track.title == "Test Song"
     assert track.filename == "song.flac"
@@ -117,6 +132,12 @@ def test_pdb_parse_and_update(tmp_path: Path):
     assert track.sample_depth == 16
     assert track.file_size == 50000000
     assert track.file_type == 0x05
+    database_sequence_before = struct.unpack_from(
+        "<I", mgr.data, DATABASE_SEQUENCE_OFFSET
+    )[0]
+    page_sequence_before = struct.unpack_from(
+        "<I", mgr.data, mgr.len_page + PAGE_SEQUENCE_OFFSET
+    )[0]
 
     # Update track to song.aiff
     mgr.update_track(
@@ -139,6 +160,24 @@ def test_pdb_parse_and_update(tmp_path: Path):
     assert t2.file_path == "/Contents/song.aiff"
     assert t2.file_size == 60000000
     assert t2.file_type == 0x0C
+    assert mgr2.seq_db == database_sequence_before
+    assert (
+        struct.unpack_from(
+            "<I", mgr2.data, mgr2.len_page + PAGE_SEQUENCE_OFFSET
+        )[0]
+        == page_sequence_before
+    )
+
+
+def test_pdb_rejects_header_sequence_not_ahead_of_pages(tmp_path: Path):
+    pdb_path = create_minimal_pdb(
+        tmp_path,
+        database_sequence=47,
+        page_sequence=47,
+    )
+
+    with pytest.raises(ValueError, match="header sequence"):
+        PDBManager(pdb_path)
 
 
 def test_pdb_refuses_growing_string(tmp_path: Path):

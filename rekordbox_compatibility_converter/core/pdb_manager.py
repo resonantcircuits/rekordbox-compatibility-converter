@@ -11,6 +11,8 @@ from .models import TrackInfo
 
 
 TRACK_FILE_TYPE_OFFSET = 0x5A
+DATABASE_SEQUENCE_OFFSET = 0x14
+PAGE_SEQUENCE_OFFSET = 0x10
 
 
 class PDBManager:
@@ -35,15 +37,29 @@ class PDBManager:
         if len(self.data) < 0x20:
             raise ValueError(f"PDB file {self.pdb_path} is too small to be valid.")
 
-        self.len_page, self.num_tables, next_u, self.seq_db = struct.unpack_from(
-            "<IIII", self.data, 4
+        self.len_page, self.num_tables, _next_unused_page = struct.unpack_from(
+            "<III", self.data, 4
         )
+        self.seq_db = struct.unpack_from(
+            "<I", self.data, DATABASE_SEQUENCE_OFFSET
+        )[0]
         if self.len_page != 4096:
             raise ValueError(f"Unsupported DeviceSQL page size: {self.len_page} bytes.")
         if len(self.data) % self.len_page != 0:
             raise ValueError("PDB file length is not aligned to its page size.")
         if 0x1C + (self.num_tables * 16) > self.len_page:
             raise ValueError("PDB table directory extends beyond the header page.")
+
+        page_sequences = [
+            struct.unpack_from("<I", self.data, page_offset + PAGE_SEQUENCE_OFFSET)[0]
+            for page_offset in range(self.len_page, len(self.data), self.len_page)
+        ]
+        max_page_sequence = max(page_sequences, default=-1)
+        if self.seq_db <= max_page_sequence:
+            raise ValueError(
+                "PDB header sequence must be greater than every page sequence "
+                f"(header {self.seq_db}, maximum page {max_page_sequence})."
+            )
 
         self.tables = []
         offset = 0x1C
@@ -325,13 +341,10 @@ class PDBManager:
                 encoded = self._encode_dsql_string(text, self.data[pos] == 0x90)
                 self.data[pos : pos + allocation] = encoded + (b"\x00" * (allocation - len(encoded)))
 
-        # Increment page sequence number
-        page_seq = struct.unpack_from("<I", self.data, page_offset + 0x10)[0]
-        struct.pack_into("<I", self.data, page_offset + 0x10, page_seq + 1)
-
-        # Increment database sequence number
-        self.seq_db += 1
-        struct.pack_into("<I", self.data, 0x14, self.seq_db)
+        # These are fixed-allocation, in-place row edits. DeviceSQL readers do not
+        # require transaction bookkeeping changes for this operation, and
+        # changing the header/page generations independently can make an
+        # otherwise valid database appear corrupt to rekordbox.
 
         # Update track in memory
         track.filename = new_filename

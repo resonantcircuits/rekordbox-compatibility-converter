@@ -18,6 +18,8 @@ from rekordbox_compatibility_converter.core.models import (
     TargetFormat,
 )
 from rekordbox_compatibility_converter.core.pdb_manager import (
+    DATABASE_SEQUENCE_OFFSET,
+    PAGE_SEQUENCE_OFFSET,
     PDBManager,
     TRACK_FILE_TYPE_OFFSET,
 )
@@ -77,6 +79,14 @@ def test_default_conversion_threads_are_usb_safe():
 def test_engine_scan_and_execute_parallel(mock_usb: Path):
     engine = ConversionEngine()
     profile = get_profile(CompatibilityProfileType.STANDARD)
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    original_pdb = pdb_path.read_bytes()
+    database_sequence_before = struct.unpack_from(
+        "<I", original_pdb, DATABASE_SEQUENCE_OFFSET
+    )[0]
+    page_sequence_before = struct.unpack_from(
+        "<I", original_pdb, 4096 + PAGE_SEQUENCE_OFFSET
+    )[0]
 
     # Scan
     summary = engine.scan(
@@ -121,12 +131,21 @@ def test_engine_scan_and_execute_parallel(mock_usb: Path):
     validation = ExportValidator().validate(mock_usb, profile)
     assert validation.failed_tracks == 0
     assert validation.issues == []
+    converted_pdb = pdb_path.read_bytes()
+    assert (
+        struct.unpack_from("<I", converted_pdb, DATABASE_SEQUENCE_OFFSET)[0]
+        == database_sequence_before
+    )
+    assert (
+        struct.unpack_from("<I", converted_pdb, 4096 + PAGE_SEQUENCE_OFFSET)[0]
+        == page_sequence_before
+    )
 
     # A database-only restore is refused after the original audio was deleted.
     success, msg = engine.restore_backup(mock_usb)
     assert success is False
     assert "missing or changed" in msg
-    assert (mock_usb / "PIONEER" / "rekordbox" / "export.pdb").exists()
+    assert pdb_path.exists()
 
 
 @pytest.mark.parametrize(
