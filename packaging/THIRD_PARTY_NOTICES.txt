@@ -1,0 +1,18 @@
+Third-party notices for Rekordbox Format Checker
+
+FFmpeg and ffprobe
+------------------
+
+This application distributes FFmpeg and ffprobe as separate executable tools.
+FFmpeg is copyright the FFmpeg developers and is not part of the Rekordbox
+Format Checker MIT-licensed source code.
+
+The exact FFmpeg version, build configuration, and applicable license are
+recorded in licenses/ffmpeg/FFMPEG_BUILD_INFO.txt. A copy of the license
+reported by that build is included in the same directory.
+
+FFmpeg source code and release archives are available from:
+https://ffmpeg.org/download.html
+
+FFmpeg licensing information is available from:
+https://ffmpeg.org/legal.html

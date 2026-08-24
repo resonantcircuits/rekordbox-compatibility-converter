@@ -1,6 +1,7 @@
 name: CI & Release Build
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, master]
     tags: ['v*']
@@ -60,7 +61,7 @@ jobs:
   build-executables:
     name: Build Desktop App (${{ matrix.asset_suffix }})
     needs: test
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -77,8 +78,8 @@ jobs:
             asset_suffix: Windows-x86_64
 
     env:
-      ASSET_BASENAME: RekordboxFormatChecker-${{ github.ref_name }}-${{ matrix.asset_suffix }}
-      RBCONVERT_SMOKE_TEST: "1"
+      BUILD_LABEL: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('test-{0}', github.run_number) }}
+      RBCONVERT_SMOKE_TEST: conversion
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -92,42 +93,77 @@ jobs:
       - name: Install dependencies & PyInstaller
         run: uv sync --frozen --extra dev --python 3.11
 
+      - name: Install bundled FFmpeg (macOS)
+        if: matrix.platform == 'macos'
+        run: brew install ffmpeg
+
+      - name: Locate bundled FFmpeg (macOS)
+        if: matrix.platform == 'macos'
+        run: |
+          mkdir -p build-vendor
+          ffmpeg -version > build-vendor/FFMPEG_BUILD_INFO.txt
+          echo "RBCONVERT_FFMPEG_PATH=$(command -v ffmpeg)" >> "$GITHUB_ENV"
+          echo "RBCONVERT_FFPROBE_PATH=$(command -v ffprobe)" >> "$GITHUB_ENV"
+          echo "RBCONVERT_FFMPEG_LICENSE_PATH=$(brew --prefix ffmpeg)/COPYING.GPLv3" >> "$GITHUB_ENV"
+          echo "RBCONVERT_FFMPEG_BUILD_INFO_PATH=$PWD/build-vendor/FFMPEG_BUILD_INFO.txt" >> "$GITHUB_ENV"
+
+      - name: Install bundled FFmpeg (Windows)
+        if: matrix.platform == 'windows'
+        run: choco install ffmpeg --no-progress -y
+
+      - name: Locate bundled FFmpeg (Windows)
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force build-vendor
+          ffmpeg -version 2>&1 | Out-File -FilePath build-vendor/FFMPEG_BUILD_INFO.txt -Encoding utf8
+          $packageRoot = "$env:ChocolateyInstall\lib\ffmpeg"
+          $ffmpegPath = Get-ChildItem $packageRoot -Recurse -File -Filter "ffmpeg.exe" |
+            Select-Object -First 1 -ExpandProperty FullName
+          $ffprobePath = Get-ChildItem $packageRoot -Recurse -File -Filter "ffprobe.exe" |
+            Select-Object -First 1 -ExpandProperty FullName
+          $licensePath = Get-ChildItem $packageRoot -Recurse -File |
+            Where-Object { $_.Name -in @("COPYING.GPLv3", "COPYING.GPLv2", "LICENSE.txt") } |
+            Select-Object -First 1 -ExpandProperty FullName
+          if (-not $ffmpegPath -or -not $ffprobePath) { throw "Could not locate the real FFmpeg executables" }
+          if (-not $licensePath) { throw "The installed FFmpeg package did not include its license" }
+          "RBCONVERT_FFMPEG_PATH=$ffmpegPath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RBCONVERT_FFPROBE_PATH=$ffprobePath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RBCONVERT_FFMPEG_LICENSE_PATH=$licensePath" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "RBCONVERT_FFMPEG_BUILD_INFO_PATH=$PWD\build-vendor\FFMPEG_BUILD_INFO.txt" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Smoke-test GUI entrypoint import
         run: uv run --frozen --extra dev python -c "from rekordbox_compatibility_converter.gui.app import main; assert callable(main)"
 
       - name: Verify tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           RELEASE_TAG: ${{ github.ref_name }}
         run: uv run --frozen --extra dev python -c "import os, tomllib; version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; expected = 'v' + version; actual = os.environ['RELEASE_TAG']; assert actual == expected, 'tag %r does not match package version %s' % (actual, expected)"
 
       - name: Build macOS App
         if: matrix.platform == 'macos'
-        run: |
-          uv run --frozen --extra dev pyinstaller --noconfirm --onedir --windowed --name "RekordboxFormatChecker" \
-            --collect-all customtkinter \
-            rekordbox_compatibility_converter/gui/app.py
+        run: uv run --frozen --extra dev pyinstaller --noconfirm --clean packaging/RekordboxFormatChecker.spec
 
       - name: Smoke-test macOS App
         if: matrix.platform == 'macos'
-        run: dist/RekordboxFormatChecker.app/Contents/MacOS/RekordboxFormatChecker
+        run: env PATH=/usr/bin:/bin:/usr/sbin:/sbin dist/RekordboxFormatChecker.app/Contents/MacOS/RekordboxFormatChecker
 
       - name: Package macOS App
         if: matrix.platform == 'macos'
         run: |
           mkdir -p release-assets
-          ditto -c -k --sequesterRsrc --keepParent dist/RekordboxFormatChecker.app "release-assets/${ASSET_BASENAME}.zip"
+          ditto -c -k --sequesterRsrc --keepParent dist/RekordboxFormatChecker.app "release-assets/RekordboxFormatChecker-${BUILD_LABEL}-${{ matrix.asset_suffix }}.zip"
 
       - name: Build Windows Exe
         if: matrix.platform == 'windows'
-        run: |
-          uv run --frozen --extra dev pyinstaller --noconfirm --onefile --windowed --name "RekordboxFormatChecker" `
-            --collect-all customtkinter `
-            rekordbox_compatibility_converter/gui/app.py
+        run: uv run --frozen --extra dev pyinstaller --noconfirm --clean packaging/RekordboxFormatChecker.spec
 
       - name: Smoke-test Windows Exe
         if: matrix.platform == 'windows'
         shell: pwsh
         run: |
+          $env:Path = "$env:SystemRoot\System32"
           $process = Start-Process -FilePath "dist/RekordboxFormatChecker.exe" -Wait -PassThru
           if ($process.ExitCode -ne 0) { throw "Packaged application exited with code $($process.ExitCode)" }
 
@@ -136,7 +172,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-assets
-          Copy-Item "dist/RekordboxFormatChecker.exe" "release-assets/$env:ASSET_BASENAME.exe"
+          Copy-Item "dist/RekordboxFormatChecker.exe" "release-assets/RekordboxFormatChecker-$env:BUILD_LABEL-${{ matrix.asset_suffix }}.exe"
 
       - name: Upload packaged executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

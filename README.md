@@ -58,7 +58,9 @@ Version tags publish these unsigned desktop builds to the corresponding GitHub R
 - `macOS-x86_64` for Intel Macs
 - `Windows-x86_64` for 64-bit Windows
 
-The release also includes `SHA256SUMS.txt` for download verification. The applications bundle Python and project dependencies, but FFmpeg and ffprobe must still be installed separately and available on `PATH`.
+The release also includes `SHA256SUMS.txt` for download verification. The applications bundle Python, project dependencies, FFmpeg, and ffprobe; users do not need to install a separate runtime. FFmpeg build and license details are included in each application.
+
+The desktop build workflow can also be started manually from GitHub Actions. Manual runs create downloadable test artifacts for both macOS architectures and Windows without publishing a GitHub Release. Each frozen application runs real AIFF, WAV, and MP3 conversions with the system `PATH` disabled before its artifact is uploaded.
 
 The current builds are not code-signed or notarized. macOS Gatekeeper and Windows SmartScreen may therefore require the user to explicitly approve the first launch. Production signing requires Apple Developer and Windows code-signing credentials configured as repository secrets.
 

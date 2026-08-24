@@ -53,6 +53,22 @@ def test_gui_smoke_mode_imports_without_launching(monkeypatch):
     assert launches == []
 
 
+def test_gui_conversion_smoke_mode_runs_packaged_self_test(monkeypatch):
+    runs = []
+    smoke_module = ModuleType("rekordbox_compatibility_converter.packaging_smoke")
+    smoke_module.run_frozen_conversion_smoke_test = lambda: runs.append(True)
+    monkeypatch.setitem(
+        sys.modules,
+        "rekordbox_compatibility_converter.packaging_smoke",
+        smoke_module,
+    )
+    monkeypatch.setenv("RBCONVERT_SMOKE_TEST", "conversion")
+
+    app.main()
+
+    assert runs == [True]
+
+
 def test_gui_entrypoint_launches_normally(monkeypatch):
     launches = []
     monkeypatch.setitem(
