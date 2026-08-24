@@ -137,7 +137,7 @@ jobs:
       - name: Configure bundled FFmpeg environment (macOS)
         if: matrix.platform == 'macos'
         run: |
-          SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-${BUILD_LABEL}-${{ matrix.asset_suffix }}-FFmpeg-Sources.tar.gz"
+          SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-${BUILD_LABEL}-FFmpeg-Sources.tar.gz"
           test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg"
           test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffprobe"
           test -d "$PWD/build-vendor/minimal-ffmpeg/legal"
@@ -162,7 +162,7 @@ jobs:
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         run: |
-          SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-${BUILD_LABEL}-${{ matrix.asset_suffix }}-FFmpeg-Sources.tar.gz"
+          SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-${BUILD_LABEL}-FFmpeg-Sources.tar.gz"
           test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg.exe"
           test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffprobe.exe"
           test -d "$PWD/build-vendor/minimal-ffmpeg/legal"
@@ -202,6 +202,11 @@ jobs:
         run: |
           mkdir -p release-assets
           ditto -c -k --sequesterRsrc --keepParent dist/RekordboxFormatChecker.app "release-assets/RekordboxFormatChecker-${BUILD_LABEL}-${{ matrix.asset_suffix }}.zip"
+
+      - name: Package shared FFmpeg corresponding source
+        if: matrix.asset_suffix == 'macOS-arm64'
+        run: |
+          mkdir -p release-assets
           cp build-vendor/minimal-ffmpeg/corresponding-source.tar.gz "release-assets/$RBCONVERT_SOURCE_ARCHIVE_NAME"
 
       - name: Build Windows Exe
@@ -226,7 +231,6 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force release-assets
           Copy-Item "dist/RekordboxFormatChecker.exe" "release-assets/RekordboxFormatChecker-$env:BUILD_LABEL-${{ matrix.asset_suffix }}.exe"
-          Copy-Item "build-vendor/minimal-ffmpeg/corresponding-source.tar.gz" "release-assets/$env:RBCONVERT_SOURCE_ARCHIVE_NAME"
 
       - name: Upload packaged executable
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

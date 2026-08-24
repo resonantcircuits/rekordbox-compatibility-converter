@@ -19,7 +19,7 @@ The packages are not code-signed or notarized. On macOS, use Finder's **Open** c
 
 Release builds compile FFmpeg and LAME from pinned source. Networking, GPL components, nonfree components, and unrelated codecs are disabled. The resulting tools support the local audio formats, artwork, hashing, resampling, and AIFF/WAV/MP3 output required by the converter.
 
-Each application download has a platform-labelled `FFmpeg-Sources.tar.gz` asset containing the exact upstream archives, checksums, licences, and build script. The packaged app also contains:
+Each release has one shared `FFmpeg-Sources.tar.gz` asset containing the exact upstream archives, checksums, licences, and cross-platform build script for all bundled FFmpeg binaries. The packaged app also contains:
 
 - The application MIT licence
 - FFmpeg and LAME licence texts

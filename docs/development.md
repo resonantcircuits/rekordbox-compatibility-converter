@@ -35,13 +35,13 @@ Manual runs upload test artifacts for 14 days but do not publish a release. Each
 
 ## Publishing a release
 
-The project version and tag must match exactly. For version `0.2.0`, use tag `v0.2.0`:
+The project version and tag must match exactly. For version `0.3.0`, use tag `v0.3.0`:
 
 ```bash
-git tag -a v0.2.0 -m "Release v0.2.0"
-git push origin v0.2.0
+git tag -a v0.3.0 -m "Release v0.3.0"
+git push origin v0.3.0
 ```
 
-The tag workflow runs tests, builds all three desktop targets, creates `SHA256SUMS.txt`, and publishes a GitHub Release with generated notes. The first build for a new FFmpeg cache key compiles from source; later matching runs restore the compact cache.
+The tag workflow runs tests, builds all three desktop targets, publishes one shared corresponding-source archive, creates `SHA256SUMS.txt`, and publishes a GitHub Release with generated notes. The first build for a new FFmpeg cache key compiles from source; later matching runs restore the compact cache.
 
 The release workflow is the only automated publisher. Do not create the GitHub Release manually before pushing the tag.

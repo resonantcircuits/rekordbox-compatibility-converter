@@ -131,3 +131,20 @@ def test_ffmpeg_distribution_metadata_rejects_forbidden_builds(
             invalid_output,
             LICENSE_OUTPUT,
         )
+
+
+def test_release_workflow_publishes_one_shared_ffmpeg_source_archive():
+    workflow = (
+        Path(__file__).parents[1] / ".github" / "workflows" / "ci.yml"
+    ).read_text(encoding="utf-8")
+
+    shared_name = (
+        'SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-'
+        '${BUILD_LABEL}-FFmpeg-Sources.tar.gz"'
+    )
+    assert workflow.count(shared_name) == 2
+    assert "${{ matrix.asset_suffix }}-FFmpeg-Sources.tar.gz" not in workflow
+    assert workflow.count(
+        'cp build-vendor/minimal-ffmpeg/corresponding-source.tar.gz '
+        '"release-assets/$RBCONVERT_SOURCE_ARCHIVE_NAME"'
+    ) == 1
