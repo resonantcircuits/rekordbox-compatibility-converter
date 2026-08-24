@@ -50,10 +50,13 @@ def _write_valid_metadata(bundle_root: Path) -> None:
     )
     tcl_tk_dir = bundle_root / "licenses" / "tcl-tk"
     tcl_tk_dir.mkdir()
-    (tcl_tk_dir / "license.terms").write_text(
-        "Copyright Tcl/Tk contributors. Permission is granted to use this software.",
-        encoding="utf-8",
-    )
+    for runtime_name in ("tcl", "tk"):
+        runtime_dir = tcl_tk_dir / runtime_name
+        runtime_dir.mkdir()
+        (runtime_dir / "license.terms").write_text(
+            f"Copyright {runtime_name} contributors. Permission is granted to use this software.",
+            encoding="utf-8",
+        )
     for package_name in ("customtkinter", "darkdetect", "packaging"):
         package_dir = bundle_root / "licenses" / "python-packages" / package_name
         package_dir.mkdir(parents=True)
@@ -84,6 +87,8 @@ def test_ffmpeg_distribution_metadata_accepts_matching_bundle(tmp_path):
         ),
         ("licenses/ffmpeg/COPYING.LGPLv2.1", "licence"),
         ("licenses/lame/COPYING", "licence"),
+        ("licenses/tcl-tk/tcl/license.terms", "licence"),
+        ("licenses/tcl-tk/tk/license.terms", "licence"),
         ("SOURCE_OFFER.txt", "SOURCE_OFFER.txt"),
     ],
 )

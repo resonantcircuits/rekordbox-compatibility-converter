@@ -120,14 +120,6 @@ def python_runtime_licence():
     raise RuntimeError("Could not find the Python runtime licence")
 
 
-def tcl_tk_licence():
-    for candidate in Path(sys.base_prefix).rglob("license.terms"):
-        lowered_parts = {part.lower() for part in candidate.parts}
-        if any(part.startswith(("tcl", "tk")) for part in lowered_parts):
-            return str(candidate.resolve())
-    raise RuntimeError("Could not find the Tcl/Tk runtime licence")
-
-
 VERSION = project_version()
 VERSION_PARTS = tuple(int(part) for part in VERSION.split("."))
 FILE_VERSION = (VERSION_PARTS + (0, 0, 0, 0))[:4]
@@ -141,6 +133,14 @@ runtime_binaries = ctk_binaries + [
 runtime_data = ctk_datas + [
     (str(PROJECT_ROOT / "packaging" / "THIRD_PARTY_NOTICES.txt"), "."),
     (str(PROJECT_ROOT / "LICENSE"), "licenses/rekordbox"),
+    (
+        str(PROJECT_ROOT / "packaging" / "licenses" / "tcl" / "license.terms"),
+        "licenses/tcl-tk/tcl",
+    ),
+    (
+        str(PROJECT_ROOT / "packaging" / "licenses" / "tk" / "license.terms"),
+        "licenses/tcl-tk/tk",
+    ),
     (required_directory("RBCONVERT_FFMPEG_LEGAL_DIR"), "licenses"),
     (generate_ffmpeg_build_info(ffmpeg_path), "licenses/ffmpeg"),
     (generate_source_offer(), "."),
@@ -149,7 +149,6 @@ runtime_data += distribution_licences("customtkinter")
 runtime_data += distribution_licences("darkdetect")
 runtime_data += distribution_licences("packaging")
 runtime_data.append((python_runtime_licence(), "licenses/python"))
-runtime_data.append((tcl_tk_licence(), "licenses/tcl-tk"))
 
 a = Analysis(
     [str(PROJECT_ROOT / "rekordbox_compatibility_converter" / "gui" / "app.py")],

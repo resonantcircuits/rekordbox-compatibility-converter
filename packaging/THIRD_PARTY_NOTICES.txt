@@ -34,4 +34,6 @@ Python and GUI dependencies
 Packaged desktop applications also contain the Python and Tcl/Tk runtimes,
 CustomTkinter, darkdetect, and packaging. Their copyright and licence texts are
 included under licenses/python, licenses/tcl-tk, and licenses/python-packages.
+The Tcl and Tk licence texts are preserved separately in the tcl and tk
+subdirectories, respectively.
 These projects are independent from and do not endorse Rekordbox Format Checker.

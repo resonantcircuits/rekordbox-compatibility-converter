@@ -223,8 +223,11 @@ class ModernRekordboxGUI(ctk.CTk):
                 "FFmpeg LGPL Licence": root / "licenses" / "ffmpeg" / "COPYING.LGPLv2.1",
                 "LAME LGPL Licence": root / "licenses" / "lame" / "COPYING",
                 "Python Runtime Licence": root / "licenses" / "python" / "LICENSE.txt",
-                "Tcl/Tk Runtime Licence": (
-                    root / "licenses" / "tcl-tk" / "license.terms"
+                "Tcl Runtime Licence": (
+                    root / "licenses" / "tcl-tk" / "tcl" / "license.terms"
+                ),
+                "Tk Runtime Licence": (
+                    root / "licenses" / "tcl-tk" / "tk" / "license.terms"
                 ),
                 "CustomTkinter Licence": (
                     root / "licenses" / "python-packages" / "customtkinter" / "LICENSE"
@@ -242,6 +245,12 @@ class ModernRekordboxGUI(ctk.CTk):
             paths = {
                 "Third-Party Notices": PROJECT_ROOT / "packaging" / "THIRD_PARTY_NOTICES.txt",
                 "Application MIT Licence": PROJECT_ROOT / "LICENSE",
+                "Tcl Runtime Licence": (
+                    PROJECT_ROOT / "packaging" / "licenses" / "tcl" / "license.terms"
+                ),
+                "Tk Runtime Licence": (
+                    PROJECT_ROOT / "packaging" / "licenses" / "tk" / "license.terms"
+                ),
                 "Corresponding Source": (
                     PROJECT_ROOT
                     / "packaging"
