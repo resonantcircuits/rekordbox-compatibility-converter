@@ -31,6 +31,7 @@ from .models import (
 )
 from .pdb_manager import PDBManager
 from .profiles import HardwareProfile, get_profile
+from .subprocess_utils import run_external
 
 DEFAULT_CONVERSION_THREADS = 2
 
@@ -732,7 +733,11 @@ class ConversionEngine:
         # Run macOS dot_clean if on Darwin
         if platform.system() == "Darwin" and shutil.which("dot_clean"):
             try:
-                subprocess.run(["dot_clean", "-m", str(usb_root)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                run_external(
+                    ["dot_clean", "-m", str(usb_root)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
             except Exception:
                 pass
 
@@ -857,14 +862,24 @@ class ConversionEngine:
 
         try:
             if os_type == "Darwin":
-                res = subprocess.run(["diskutil", "unmountDisk", str(usb_root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                res = run_external(
+                    ["diskutil", "unmountDisk", str(usb_root)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
                 if res.returncode == 0:
                     return True, f"Drive {usb_root.name} safely unmounted."
                 return False, res.stderr.strip()
             elif os_type == "Windows":
                 return False, "On Windows, use 'Safely Remove Hardware' from the system tray."
             else:
-                res = subprocess.run(["umount", str(usb_root)], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                res = run_external(
+                    ["umount", str(usb_root)],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
                 if res.returncode == 0:
                     return True, f"Drive {usb_root.name} safely unmounted."
                 return False, res.stderr.strip()

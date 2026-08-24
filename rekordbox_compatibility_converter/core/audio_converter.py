@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 from .models import TargetFormat
+from .subprocess_utils import run_external
 
 
 class AudioConverter:
@@ -54,7 +55,13 @@ class AudioConverter:
             str(file_path),
         ]
         try:
-            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+            result = run_external(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=True,
+            )
             info = json.loads(result.stdout)
             audio_stream = next((s for s in info.get("streams", []) if s.get("codec_type") == "audio"), {})
 
@@ -109,7 +116,7 @@ class AudioConverter:
             "-hash", "sha256",
             "-",
         ]
-        result = subprocess.run(
+        result = run_external(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -204,7 +211,12 @@ class AudioConverter:
         cmd.append(str(tmp_target))
 
         try:
-            res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            res = run_external(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
             if res.returncode != 0:
                 if tmp_target.exists():
                     tmp_target.unlink()
