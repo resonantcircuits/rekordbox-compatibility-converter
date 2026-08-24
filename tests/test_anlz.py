@@ -1,5 +1,6 @@
 """Tests for ANLZ file parser and patcher."""
 
+import os
 import struct
 from pathlib import Path
 from rekordbox_compatibility_converter.core.anlz_manager import ANLZManager
@@ -51,6 +52,26 @@ def test_anlz_read_and_update(tmp_path: Path):
 
     # Verify backup exists
     assert (tmp_path / "ANLZ0000.DAT.bak").exists()
+
+
+def test_anlz_backup_fsync_uses_writable_descriptor(
+    tmp_path: Path, monkeypatch
+):
+    anlz_file = create_minimal_anlz(tmp_path, "/Contents/song.flac")
+    real_fsync = os.fsync
+
+    def require_writable_descriptor(fd: int):
+        os.write(fd, b"")
+        real_fsync(fd)
+
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.anlz_manager.os.fsync",
+        require_writable_descriptor,
+    )
+
+    assert ANLZManager.update_path(
+        anlz_file, "/Contents/song.aiff", backup=True
+    )
 
 
 def test_anlz_corrupt_zero_length_tag_does_not_hang(tmp_path: Path):

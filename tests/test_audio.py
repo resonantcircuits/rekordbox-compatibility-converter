@@ -69,6 +69,29 @@ def test_convert_flac_to_aiff(sample_flac: Path, tmp_path: Path):
     assert "aiff" in info.get("format_name", "").lower()
 
 
+def test_converted_output_fsync_uses_writable_descriptor(
+    sample_flac: Path, tmp_path: Path, monkeypatch
+):
+    real_fsync = os.fsync
+
+    def require_writable_descriptor(fd: int):
+        os.write(fd, b"")
+        real_fsync(fd)
+
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.audio_converter.os.fsync",
+        require_writable_descriptor,
+    )
+
+    success, _size, error = AudioConverter().convert(
+        sample_flac,
+        tmp_path / "synced.aiff",
+        target_format=TargetFormat.AIFF,
+    )
+
+    assert success is True, error
+
+
 def test_audio_converter_rejects_unsupported_pcm_depth(sample_flac: Path, tmp_path: Path):
     target = tmp_path / "invalid.aiff"
 

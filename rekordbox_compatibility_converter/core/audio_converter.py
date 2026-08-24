@@ -212,7 +212,7 @@ class AudioConverter:
                 tmp_target.unlink(missing_ok=True)
                 return False, 0, "Converted output is not MP3 audio."
 
-            with open(tmp_target, "rb") as converted_file:
+            with open(tmp_target, "r+b") as converted_file:
                 os.fsync(converted_file.fileno())
             if target_path.exists():
                 tmp_target.unlink(missing_ok=True)

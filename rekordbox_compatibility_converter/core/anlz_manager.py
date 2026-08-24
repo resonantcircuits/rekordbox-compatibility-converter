@@ -118,7 +118,7 @@ class ANLZManager:
             bak_temp = bak_path.with_name(f".{bak_path.name}.{uuid.uuid4().hex}.tmp")
             try:
                 shutil.copy2(anlz_file, bak_temp)
-                with open(bak_temp, "rb") as backup_file:
+                with open(bak_temp, "r+b") as backup_file:
                     os.fsync(backup_file.fileno())
                 os.replace(bak_temp, bak_path)
             finally:

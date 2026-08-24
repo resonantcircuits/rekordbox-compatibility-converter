@@ -1,5 +1,6 @@
 """Tests for PDB manager and DeviceSQL manipulation."""
 
+import os
 import struct
 from pathlib import Path
 import pytest
@@ -167,6 +168,25 @@ def test_pdb_parse_and_update(tmp_path: Path):
         )[0]
         == page_sequence_before
     )
+
+
+def test_pdb_backup_fsync_uses_writable_descriptor(tmp_path: Path, monkeypatch):
+    pdb_path = create_minimal_pdb(tmp_path)
+    manager = PDBManager(pdb_path)
+    real_fsync = os.fsync
+
+    def require_writable_descriptor(fd: int):
+        os.write(fd, b"")
+        real_fsync(fd)
+
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.pdb_manager.os.fsync",
+        require_writable_descriptor,
+    )
+
+    manager.save(backup=True)
+
+    assert pdb_path.with_suffix(".pdb.bak").is_file()
 
 
 def test_pdb_rejects_header_sequence_not_ahead_of_pages(tmp_path: Path):

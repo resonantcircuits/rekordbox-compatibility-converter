@@ -366,7 +366,7 @@ class PDBManager:
             )
             try:
                 shutil.copy2(self.pdb_path, backup_temp)
-                with open(backup_temp, "rb") as backup_file:
+                with open(backup_temp, "r+b") as backup_file:
                     os.fsync(backup_file.fileno())
                 os.replace(backup_temp, backup_path)
             finally:
