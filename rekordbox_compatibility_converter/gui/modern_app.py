@@ -47,6 +47,34 @@ PROFILE_VALUES = {
     "Modern Lossless": "modern",
 }
 
+TRACK_TABLE_COLUMNS = (
+    (
+        "id",
+        "ID",
+        {"width": 60, "minwidth": 50, "anchor": "center", "stretch": False},
+    ),
+    (
+        "title",
+        "Track Title",
+        {"width": 300, "minwidth": 180, "anchor": "w", "stretch": True},
+    ),
+    (
+        "format",
+        "Format",
+        {"width": 90, "minwidth": 80, "anchor": "center", "stretch": False},
+    ),
+    (
+        "specs",
+        "Current Spec",
+        {"width": 170, "minwidth": 160, "anchor": "center", "stretch": False},
+    ),
+    (
+        "target",
+        "Converts To",
+        {"width": 220, "minwidth": 200, "anchor": "center", "stretch": False},
+    ),
+)
+
 COVERED_BASELINE_MODELS = (
     "CDJ-350",
     "CDJ-850",
@@ -832,19 +860,11 @@ class ModernRekordboxGUI(ctk.CTk):
         self.tree_container = tk.Frame(table_card, bg="#1B1B1D")
         self.tree_container.pack(fill="both", expand=True, padx=14, pady=(0, 14))
 
-        columns = ("id", "title", "format", "specs", "target")
+        columns = tuple(column_id for column_id, _heading, _options in TRACK_TABLE_COLUMNS)
         self.tree = ttk.Treeview(self.tree_container, columns=columns, show="headings", selectmode="browse")
-        self.tree.heading("id", text="ID")
-        self.tree.heading("title", text="Track Title")
-        self.tree.heading("format", text="Format")
-        self.tree.heading("specs", text="Current Spec")
-        self.tree.heading("target", text="Converts To")
-
-        self.tree.column("id", width=60, anchor="center", stretch=False)
-        self.tree.column("title", width=380)
-        self.tree.column("format", width=90, anchor="center", stretch=False)
-        self.tree.column("specs", width=150, anchor="center", stretch=False)
-        self.tree.column("target", width=120, anchor="center", stretch=False)
+        for column_id, heading, options in TRACK_TABLE_COLUMNS:
+            self.tree.heading(column_id, text=heading)
+            self.tree.column(column_id, **options)
 
         tree_scroll = ttk.Scrollbar(self.tree_container, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=tree_scroll.set)
@@ -1341,6 +1361,15 @@ class ModernRekordboxGUI(ctk.CTk):
                         total_count,
                     )
 
+                def on_phase(phase, cur, total_count, detail):
+                    self._post_to_ui(
+                        self._update_phase,
+                        phase,
+                        cur,
+                        total_count,
+                        detail,
+                    )
+
                 result = self.engine.execute(
                     summary=conversion_summary,
                     delete_original=delete_original,
@@ -1348,6 +1377,7 @@ class ModernRekordboxGUI(ctk.CTk):
                     threads=threads,
                     clean_dotfiles=clean_dotfiles,
                     progress_callback=on_prog,
+                    phase_callback=on_phase,
                     allow_onelibrary_bridge=bridge_mode,
                     local_original_backup_dir=local_backup_dir,
                     replace_existing_targets=replace_existing_targets,
@@ -1364,6 +1394,59 @@ class ModernRekordboxGUI(ctk.CTk):
             )
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _update_phase(
+        self, phase: str, current: int, total: int, detail: str
+    ) -> None:
+        labels = {
+            "preflight": "Checking files",
+            "backup": "Backing up and verifying files",
+            "backup_verification": "Verifying recovery copies",
+            "metadata_backup": "Protecting Rekordbox metadata",
+            "conversion": "Starting conversion",
+            "cleanup": "Cleaning USB",
+            "finalizing": "Finalizing recovery archive",
+        }
+        label = labels.get(phase, "Preparing conversion")
+        if total > 0:
+            self.progress_bar.stop()
+            self.progress_bar.configure(mode="determinate")
+            self.progress_bar.set(min(1.0, current / total))
+            if phase in {"backup", "backup_verification"}:
+                def format_bytes(value: int) -> str:
+                    if value >= 1024 ** 3:
+                        return f"{value / (1024 ** 3):.2f} GiB"
+                    if value >= 1024 ** 2:
+                        return f"{value / (1024 ** 2):.1f} MiB"
+                    return f"{value / 1024:.1f} KiB"
+
+                count_text = f"{format_bytes(current)} of {format_bytes(total)}"
+            else:
+                count_text = f"{current} of {total}"
+        else:
+            self.progress_bar.configure(mode="indeterminate")
+            self.progress_bar.start()
+            count_text = "in progress"
+        button_labels = {
+            "preflight": "Checking files",
+            "backup": "Backing up",
+            "backup_verification": "Verifying backup",
+            "metadata_backup": "Protecting metadata",
+            "conversion": "Starting conversion",
+            "cleanup": "Cleaning USB",
+            "finalizing": "Finalizing",
+        }
+        if total > 0:
+            button_progress = f" {min(100, round(current / total * 100))}%"
+        else:
+            button_progress = "..."
+        self.btn_convert.configure(
+            text=f"{button_labels.get(phase, 'Preparing')}{button_progress}"
+        )
+        detail_text = f" Latest: {detail[:55]}." if detail else ""
+        self.lbl_status.configure(
+            text=f"{label} — {count_text}.{detail_text} Do not eject the USB."
+        )
 
     def _update_prog(self, pct: float, name: str, current: int, total: int):
         self.progress_bar.stop()

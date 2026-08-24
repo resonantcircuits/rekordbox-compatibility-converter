@@ -438,6 +438,7 @@ def test_onelibrary_bridge_archives_originals_locally_and_reclaims_usb_space(
     backup_base = tmp_path / "Local Backups"
     engine = ConversionEngine()
     summary = engine.scan(mock_usb, allow_onelibrary_bridge=True)
+    phases = []
 
     assert summary.required_space_with_local_backup_bytes < summary.required_space_bytes
     assert summary.local_backup_required_space_bytes > 0
@@ -450,6 +451,9 @@ def test_onelibrary_bridge_archives_originals_locally_and_reclaims_usb_space(
         threads=1,
         allow_onelibrary_bridge=True,
         local_original_backup_dir=backup_base,
+        phase_callback=lambda phase, current, total, detail: phases.append(
+            (phase, current, total, detail)
+        ),
     )
 
     assert result["success"] is True
@@ -464,6 +468,16 @@ def test_onelibrary_bridge_archives_originals_locally_and_reclaims_usb_space(
     assert manifest["originals"][0]["status"] == "converted"
     assert (session / manifest["originals"][0]["archive_path"]).is_file()
     assert any(item["usb_path"].endswith("export.pdb") for item in manifest["metadata"])
+    phase_names = [event[0] for event in phases]
+    assert phase_names[0] == "preflight"
+    assert "backup" in phase_names
+    assert "backup_verification" in phase_names
+    assert "conversion" in phase_names
+    assert phase_names[-1] == "finalizing"
+    for phase in ("backup", "backup_verification"):
+        final_event = [event for event in phases if event[0] == phase][-1]
+        assert final_event[1] == final_event[2]
+        assert final_event[3]
 
 
 def test_local_archive_conversion_failure_restores_usb_original(
@@ -796,9 +810,14 @@ def test_local_archive_refuses_source_changed_after_copy(
 ):
     original_archive = LocalBackupSession.archive
 
-    def archive_then_change(session, tasks, metadata_paths):
+    def archive_then_change(session, tasks, metadata_paths, progress_callback=None):
         task_list = list(tasks)
-        original_archive(session, task_list, metadata_paths)
+        original_archive(
+            session,
+            task_list,
+            metadata_paths,
+            progress_callback=progress_callback,
+        )
         source = task_list[0].source_abs_path
         source.write_bytes(source.read_bytes() + b"changed after archive")
 

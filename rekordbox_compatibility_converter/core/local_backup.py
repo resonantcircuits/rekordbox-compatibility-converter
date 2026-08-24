@@ -8,7 +8,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
 from .models import ConversionTask
 
@@ -25,11 +25,16 @@ class LocalBackupSession:
         self._lock = threading.RLock()
 
     @staticmethod
-    def _sha256(path: Path) -> str:
+    def _sha256(
+        path: Path,
+        progress_callback: Optional[Callable[[int], None]] = None,
+    ) -> str:
         digest = hashlib.sha256()
         with open(path, "rb") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
                 digest.update(chunk)
+                if progress_callback:
+                    progress_callback(len(chunk))
         return digest.hexdigest()
 
     @staticmethod
@@ -150,26 +155,89 @@ class LocalBackupSession:
         except ValueError as exc:
             raise ValueError(f"Refusing to archive path outside selected USB: {source}") from exc
 
-    def _copy_verified(self, source: Path, destination: Path) -> Tuple[int, str]:
+    def _copy_verified(
+        self,
+        source: Path,
+        destination: Path,
+        progress_callback: Optional[Callable[[int], None]] = None,
+    ) -> Tuple[int, str]:
         destination.parent.mkdir(parents=True, exist_ok=True)
         temp = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.tmp")
         try:
-            shutil.copy2(source, temp)
-            with open(temp, "rb+") as copied:
+            source_stat = source.stat()
+            source_digest = hashlib.sha256()
+            with open(source, "rb") as input_file, open(temp, "xb") as copied:
+                for chunk in iter(lambda: input_file.read(1024 * 1024), b""):
+                    copied.write(chunk)
+                    source_digest.update(chunk)
+                    if progress_callback:
+                        progress_callback(len(chunk))
+                copied.flush()
                 os.fsync(copied.fileno())
-            source_size = source.stat().st_size
-            source_sha256 = self._sha256(source)
-            if temp.stat().st_size != source_size or self._sha256(temp) != source_sha256:
+            shutil.copystat(source, temp)
+            current_source_stat = source.stat()
+            if (
+                current_source_stat.st_size != source_stat.st_size
+                or current_source_stat.st_mtime_ns != source_stat.st_mtime_ns
+            ):
+                raise OSError(f"Source changed while archiving {source}")
+            source_sha256 = source_digest.hexdigest()
+            if (
+                temp.stat().st_size != source_stat.st_size
+                or self._sha256(temp, progress_callback) != source_sha256
+            ):
                 raise OSError(f"Verification failed while archiving {source}")
             os.replace(temp, destination)
             self._sync_directory(destination.parent)
-            return source_size, source_sha256
+            return source_stat.st_size, source_sha256
         finally:
             temp.unlink(missing_ok=True)
 
-    def archive(self, tasks: Iterable[ConversionTask], metadata_paths: Iterable[Path]) -> None:
+    def archive(
+        self,
+        tasks: Iterable[ConversionTask],
+        metadata_paths: Iterable[Path],
+        progress_callback: Optional[Callable[[int, int, Path], None]] = None,
+    ) -> None:
         """Copy and verify every source and metadata file before USB mutation."""
         tasks = list(tasks)
+        metadata_paths = list(metadata_paths)
+        unique_originals = {
+            str(task.source_abs_path.resolve()).casefold(): task.source_abs_path.resolve()
+            for task in tasks
+        }
+        unique_targets = {
+            str(task.target_abs_path.resolve()).casefold(): task.target_abs_path.resolve()
+            for task in tasks
+            if str(task.target_abs_path.resolve()).casefold()
+            != str(task.source_abs_path.resolve()).casefold()
+            and not task.reuse_existing_target
+            and task.target_abs_path.is_file()
+        }
+        unique_metadata = {
+            str(Path(path).resolve()).casefold(): Path(path).resolve()
+            for path in metadata_paths
+        }
+        all_paths = (
+            list(unique_originals.values())
+            + list(unique_targets.values())
+            + list(unique_metadata.values())
+        )
+        total_bytes = 2 * sum(path.stat().st_size for path in all_paths)
+        completed_bytes = 0
+        last_reported_bytes = 0
+
+        def advance(amount: int, path: Path, force: bool = False) -> None:
+            nonlocal completed_bytes, last_reported_bytes
+            completed_bytes += amount
+            if progress_callback and (
+                force
+                or completed_bytes == total_bytes
+                or completed_bytes - last_reported_bytes >= 8 * 1024 * 1024
+            ):
+                progress_callback(completed_bytes, total_bytes, path)
+                last_reported_bytes = completed_bytes
+
         originals_by_path: Dict[str, Dict] = {}
         for task in tasks:
             source = task.source_abs_path.resolve()
@@ -177,7 +245,11 @@ class LocalBackupSession:
             if key not in originals_by_path:
                 relative = self._relative_usb_path(source)
                 archive_relative = Path("originals") / relative
-                size, digest = self._copy_verified(source, self.session_dir / archive_relative)
+                size, digest = self._copy_verified(
+                    source,
+                    self.session_dir / archive_relative,
+                    progress_callback=lambda amount, path=source: advance(amount, path),
+                )
                 originals_by_path[key] = {
                     "usb_path": relative.as_posix(),
                     "archive_path": archive_relative.as_posix(),
@@ -187,6 +259,7 @@ class LocalBackupSession:
                     "status": "archived",
                     "target_paths": [],
                 }
+                advance(0, source, force=True)
             target_path = task.target_usb_path.lstrip("/")
             if target_path not in originals_by_path[key]["target_paths"]:
                 originals_by_path[key]["target_paths"].append(target_path)
@@ -207,7 +280,9 @@ class LocalBackupSession:
             relative = self._relative_usb_path(target)
             archive_relative = Path("preexisting_targets") / relative
             size, digest = self._copy_verified(
-                target, self.session_dir / archive_relative
+                target,
+                self.session_dir / archive_relative,
+                progress_callback=lambda amount, path=target: advance(amount, path),
             )
             preexisting_targets.append(
                 {
@@ -219,6 +294,7 @@ class LocalBackupSession:
                     "status": "archived",
                 }
             )
+            advance(0, target, force=True)
 
         metadata_entries: List[Dict] = []
         seen_metadata = set()
@@ -230,7 +306,11 @@ class LocalBackupSession:
             seen_metadata.add(key)
             relative = self._relative_usb_path(source)
             archive_relative = Path("metadata") / relative
-            size, digest = self._copy_verified(source, self.session_dir / archive_relative)
+            size, digest = self._copy_verified(
+                source,
+                self.session_dir / archive_relative,
+                progress_callback=lambda amount, path=source: advance(amount, path),
+            )
             metadata_entries.append(
                 {
                     "usb_path": relative.as_posix(),
@@ -239,6 +319,7 @@ class LocalBackupSession:
                     "sha256": digest,
                 }
             )
+            advance(0, source, force=True)
 
         self.manifest["originals"] = list(originals_by_path.values())
         self.manifest["preexisting_targets"] = preexisting_targets
@@ -259,23 +340,47 @@ class LocalBackupSession:
             raise ValueError(f"Archived original is missing or changed: {archive}")
         return archive
 
-    def remove_originals_from_usb(self) -> None:
+    def remove_originals_from_usb(
+        self,
+        progress_callback: Optional[Callable[[int, int, Path], None]] = None,
+    ) -> None:
         removed: List[Dict] = []
-        try:
-            for entry in (
-                self.manifest["originals"] + self.manifest["preexisting_targets"]
+        entries = self.manifest["originals"] + self.manifest["preexisting_targets"]
+        total_bytes = 2 * sum(int(entry["size"]) for entry in entries)
+        completed_bytes = 0
+        last_reported_bytes = 0
+
+        def advance(amount: int, path: Path, force: bool = False) -> None:
+            nonlocal completed_bytes, last_reported_bytes
+            completed_bytes += amount
+            if progress_callback and (
+                force
+                or completed_bytes == total_bytes
+                or completed_bytes - last_reported_bytes >= 8 * 1024 * 1024
             ):
+                progress_callback(completed_bytes, total_bytes, path)
+                last_reported_bytes = completed_bytes
+
+        try:
+            for entry in entries:
                 source = self.usb_root / entry["usb_path"]
                 archive = self.session_dir / entry["archive_path"]
-                if self._sha256(archive) != entry["sha256"]:
+                if self._sha256(
+                    archive,
+                    lambda amount, path=source: advance(amount, path),
+                ) != entry["sha256"]:
                     raise OSError(f"Archived original failed verification: {archive}")
-                if self._sha256(source) != entry["sha256"]:
+                if self._sha256(
+                    source,
+                    lambda amount, path=source: advance(amount, path),
+                ) != entry["sha256"]:
                     raise OSError(f"USB original changed after archiving: {source}")
                 source.unlink()
                 self._sync_directory(source.parent)
                 entry["status"] = "removed_from_usb"
                 removed.append(entry)
                 self._save_manifest()
+                advance(0, source, force=True)
         except Exception:
             for entry in reversed(removed):
                 try:

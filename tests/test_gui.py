@@ -170,6 +170,19 @@ def test_help_text_keeps_compatibility_and_onelibrary_workflow_accessible():
     assert "Convert from Device Library" in modern_app.WORKFLOW_HELP
 
 
+def test_track_table_reserves_space_for_complete_target_specification():
+    columns = {
+        column_id: options
+        for column_id, _heading, options in modern_app.TRACK_TABLE_COLUMNS
+    }
+
+    assert columns["target"]["width"] >= 200
+    assert columns["target"]["minwidth"] >= 190
+    assert columns["target"]["stretch"] is False
+    assert columns["title"]["stretch"] is True
+    assert columns["title"]["width"] < 380
+
+
 def test_about_documents_expose_application_and_third_party_terms(monkeypatch):
     monkeypatch.setattr(modern_app.sys, "frozen", False, raising=False)
 
@@ -222,6 +235,32 @@ def test_conversion_progress_shows_track_count_and_latest_file():
     assert button.config["text"] == "Converting 2 of 8..."
     assert "2 of 8 tracks processed" in status.config["text"]
     assert "Example.flac" in status.config["text"]
+
+
+def test_backup_phase_shows_file_count_and_latest_file():
+    progress = _FakeWidget()
+    button = _FakeWidget()
+    status = _FakeWidget()
+    gui = SimpleNamespace(
+        progress_bar=progress,
+        btn_convert=button,
+        lbl_status=status,
+    )
+
+    ModernRekordboxGUI._update_phase(
+        gui,
+        "backup",
+        37 * 1024 * 1024,
+        120 * 1024 * 1024,
+        "Long Track Name.flac",
+    )
+
+    assert progress.config["mode"] == "determinate"
+    assert progress.value == 37 / 120
+    assert button.config["text"] == "Backing up 31%"
+    assert "Backing up and verifying files" in status.config["text"]
+    assert "37.0 MiB of 120.0 MiB" in status.config["text"]
+    assert "Long Track Name.flac" in status.config["text"]
 
 
 def test_cleanup_confirmation_requires_rekordbox_verification(monkeypatch):

@@ -879,11 +879,21 @@ class ConversionEngine:
         threads: int = DEFAULT_CONVERSION_THREADS,
         clean_dotfiles: bool = True,
         progress_callback: Optional[Callable[[ConversionTask, int, int], None]] = None,
+        phase_callback: Optional[Callable[[str, int, int, str], None]] = None,
         allow_onelibrary_bridge: bool = False,
         local_original_backup_dir: Optional[Path] = None,
         replace_existing_targets: bool = False,
     ) -> dict:
         """Execute conversion, optionally archiving originals off the USB first."""
+        def report_phase(phase: str, current: int, total: int, detail: str = "") -> None:
+            if not phase_callback:
+                return
+            try:
+                phase_callback(phase, current, total, detail)
+            except Exception:
+                # Status reporting must never interrupt a recoverable conversion.
+                pass
+
         pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
         if not pdb_path.is_file():
             return {"success": False, "error": "export.pdb not found."}
@@ -969,7 +979,8 @@ class ConversionEngine:
             if track.file_path
         }
 
-        for task in summary.tasks:
+        report_phase("preflight", 0, total_tasks, "Checking conversion plan")
+        for task_number, task in enumerate(summary.tasks, start=1):
             task.status = "pending"
             task.error = None
             task.reuse_existing_target = False
@@ -1093,6 +1104,7 @@ class ConversionEngine:
             if task.error:
                 task.status = "failed"
                 preflight_errors.append(task.error)
+            report_phase("preflight", task_number, total_tasks, task.track.filename)
 
         if preflight_errors:
             return {
@@ -1177,13 +1189,27 @@ class ConversionEngine:
                 if dlp_path.is_file():
                     metadata_paths.add(dlp_path)
             try:
+                report_phase("backup", 0, 0, "Creating local recovery archive")
                 local_session = LocalBackupSession.create(
                     local_backup_base,
                     summary.usb_root,
                     summary.pdb_sha256,
                 )
-                local_session.archive(summary.tasks, metadata_paths)
-                local_session.remove_originals_from_usb()
+                local_session.archive(
+                    summary.tasks,
+                    metadata_paths,
+                    progress_callback=lambda current, total, path: report_phase(
+                        "backup", current, total, path.name
+                    ),
+                )
+                report_phase(
+                    "backup_verification", 0, 0, "Checking archived originals"
+                )
+                local_session.remove_originals_from_usb(
+                    progress_callback=lambda current, total, path: report_phase(
+                        "backup_verification", current, total, path.name
+                    )
+                )
             except Exception as exc:
                 return {
                     "success": False,
@@ -1199,6 +1225,7 @@ class ConversionEngine:
         # complete local recovery archive was requested.
         if backup and local_session is None:
             try:
+                report_phase("metadata_backup", 0, total_tasks, "Protecting Rekordbox metadata")
                 pdb_manager.save(backup=True)
                 backed_up_paths = set()
                 for task in summary.tasks:
@@ -1437,6 +1464,7 @@ class ConversionEngine:
                     warnings.append(f"Could not remove staging file {stage}: {cleanup_exc}")
 
         max_workers = max(1, min(threads, total_tasks if total_tasks > 0 else 1))
+        report_phase("conversion", 0, total_tasks, "Starting audio conversion")
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_task = {
                 executor.submit(convert_to_stage, task): task for task in summary.tasks
@@ -1474,6 +1502,7 @@ class ConversionEngine:
         # Clean AppleDouble ghost files
         cleaned_files = 0
         if clean_dotfiles:
+            report_phase("cleanup", 0, 1, "Removing macOS ghost files")
             cleaned_files = self.clean_dotfiles(summary.usb_root)
 
         if summary.onelibrary_bridge_mode and completed:
@@ -1482,6 +1511,7 @@ class ConversionEngine:
         local_session_error = ""
         if local_session:
             try:
+                report_phase("finalizing", 0, 1, "Finalizing recovery archive")
                 local_session.finish(failed == 0)
             except Exception as exc:
                 local_session_error = f"Could not finalize local recovery manifest: {exc}"
