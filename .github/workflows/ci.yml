@@ -98,8 +98,18 @@ jobs:
       - name: Install dependencies & PyInstaller
         run: uv sync --frozen --extra dev --python 3.11
 
+      - name: Restore minimal FFmpeg build
+        id: ffmpeg-cache
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: |
+            build-vendor/minimal-ffmpeg/bin
+            build-vendor/minimal-ffmpeg/legal
+            build-vendor/minimal-ffmpeg/corresponding-source.tar.gz
+          key: minimal-ffmpeg-v1-${{ matrix.asset_suffix }}-${{ hashFiles('packaging/ffmpeg/build_minimal_ffmpeg.sh', 'packaging/ffmpeg/versions.env', 'packaging/ffmpeg/CORRESPONDING_SOURCE_README.md') }}
+
       - name: Install NASM (macOS Intel)
-        if: matrix.asset_suffix == 'macOS-x86_64'
+        if: matrix.asset_suffix == 'macOS-x86_64' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
         run: |
           if brew tap | grep -Fxq aws/tap
           then
@@ -121,10 +131,18 @@ jobs:
             mingw-w64-x86_64-zlib
 
       - name: Build minimal bundled FFmpeg (macOS)
+        if: matrix.platform == 'macos' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: packaging/ffmpeg/build_minimal_ffmpeg.sh "$PWD/build-vendor/minimal-ffmpeg"
+
+      - name: Configure bundled FFmpeg environment (macOS)
         if: matrix.platform == 'macos'
         run: |
           SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-${BUILD_LABEL}-${{ matrix.asset_suffix }}-FFmpeg-Sources.tar.gz"
-          packaging/ffmpeg/build_minimal_ffmpeg.sh "$PWD/build-vendor/minimal-ffmpeg"
+          test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg"
+          test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffprobe"
+          test -d "$PWD/build-vendor/minimal-ffmpeg/legal"
+          test -f "$PWD/build-vendor/minimal-ffmpeg/corresponding-source.tar.gz"
+          "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg" -version
           echo "RBCONVERT_FFMPEG_PATH=$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg" >> "$GITHUB_ENV"
           echo "RBCONVERT_FFPROBE_PATH=$PWD/build-vendor/minimal-ffmpeg/bin/ffprobe" >> "$GITHUB_ENV"
           echo "RBCONVERT_FFMPEG_LEGAL_DIR=$PWD/build-vendor/minimal-ffmpeg/legal" >> "$GITHUB_ENV"
@@ -136,11 +154,20 @@ jobs:
           fi
 
       - name: Build minimal bundled FFmpeg (Windows)
+        if: matrix.platform == 'windows' && steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        shell: msys2 {0}
+        run: packaging/ffmpeg/build_minimal_ffmpeg.sh "$PWD/build-vendor/minimal-ffmpeg"
+
+      - name: Configure bundled FFmpeg environment (Windows)
         if: matrix.platform == 'windows'
         shell: msys2 {0}
         run: |
           SOURCE_ARCHIVE_NAME="RekordboxFormatChecker-${BUILD_LABEL}-${{ matrix.asset_suffix }}-FFmpeg-Sources.tar.gz"
-          packaging/ffmpeg/build_minimal_ffmpeg.sh "$PWD/build-vendor/minimal-ffmpeg"
+          test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg.exe"
+          test -x "$PWD/build-vendor/minimal-ffmpeg/bin/ffprobe.exe"
+          test -d "$PWD/build-vendor/minimal-ffmpeg/legal"
+          test -f "$PWD/build-vendor/minimal-ffmpeg/corresponding-source.tar.gz"
+          "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg.exe" -version
           echo "RBCONVERT_FFMPEG_PATH=$(cygpath -w "$PWD/build-vendor/minimal-ffmpeg/bin/ffmpeg.exe")" >> "$GITHUB_ENV"
           echo "RBCONVERT_FFPROBE_PATH=$(cygpath -w "$PWD/build-vendor/minimal-ffmpeg/bin/ffprobe.exe")" >> "$GITHUB_ENV"
           echo "RBCONVERT_FFMPEG_LEGAL_DIR=$(cygpath -w "$PWD/build-vendor/minimal-ffmpeg/legal")" >> "$GITHUB_ENV"
