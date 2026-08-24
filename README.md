@@ -13,7 +13,7 @@ Releases are available for Apple Silicon Macs, Intel Macs, and 64-bit Windows. F
 
 ## Desktop app
 
-> Screenshot placeholder: add the GUI image at `docs/images/rekordbox-format-checker.png`.
+![Rekordbox Compatibility Converter desktop app](docs/images/rekordbox-format-checker.png)
 
 1. Keep a separate backup of the USB.
 2. Connect the Rekordbox USB and select it in the app.

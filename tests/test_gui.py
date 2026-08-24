@@ -1,7 +1,9 @@
 """Tests for the desktop GUI entrypoint."""
 
 import json
+import queue
 import sys
+import threading
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -30,13 +32,16 @@ class _FakeWidget:
         self.started = False
 
 
-def _fake_modern_app(launches):
+def _fake_modern_app(launches, threading_smokes=None):
     module = ModuleType("rekordbox_compatibility_converter.gui.modern_app")
 
     def fake_main():
         launches.append(True)
 
     module.main = fake_main
+    module.run_threading_smoke_test = lambda: (
+        threading_smokes.append(True) if threading_smokes is not None else None
+    )
     return module
 
 
@@ -70,6 +75,22 @@ def test_gui_conversion_smoke_mode_runs_packaged_self_test(monkeypatch):
     assert runs == [True]
 
 
+def test_gui_threading_smoke_mode_runs_tk_smoke_test(monkeypatch):
+    launches = []
+    threading_smokes = []
+    monkeypatch.setitem(
+        sys.modules,
+        "rekordbox_compatibility_converter.gui.modern_app",
+        _fake_modern_app(launches, threading_smokes),
+    )
+    monkeypatch.setenv("RBCONVERT_SMOKE_TEST", "gui-threading")
+
+    app.main()
+
+    assert launches == []
+    assert threading_smokes == [True]
+
+
 def test_gui_entrypoint_launches_normally(monkeypatch):
     launches = []
     monkeypatch.setitem(
@@ -82,6 +103,34 @@ def test_gui_entrypoint_launches_normally(monkeypatch):
     app.main()
 
     assert launches == [True]
+
+
+def test_worker_ui_posts_do_not_call_tk_from_worker_thread():
+    main_thread = threading.get_ident()
+    callback_threads = []
+    scheduled_polls = []
+    gui = SimpleNamespace(
+        _ui_queue=queue.Queue(),
+        after=lambda delay, callback: scheduled_polls.append((delay, callback)),
+    )
+    gui._drain_ui_queue = lambda: ModernRekordboxGUI._drain_ui_queue(gui)
+
+    worker = threading.Thread(
+        target=lambda: ModernRekordboxGUI._post_to_ui(
+            gui,
+            lambda: callback_threads.append(threading.get_ident()),
+        )
+    )
+    worker.start()
+    worker.join()
+
+    assert callback_threads == []
+    assert scheduled_polls == []
+
+    ModernRekordboxGUI._drain_ui_queue(gui)
+
+    assert callback_threads == [main_thread]
+    assert scheduled_polls[0][0] == 25
 
 
 def test_guidance_preference_is_persisted(tmp_path, monkeypatch):

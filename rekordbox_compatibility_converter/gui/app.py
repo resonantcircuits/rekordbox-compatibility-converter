@@ -12,6 +12,13 @@ def main():
 
         run_frozen_conversion_smoke_test()
         return
+    if smoke_mode == "gui-threading":
+        from rekordbox_compatibility_converter.gui.modern_app import (
+            run_threading_smoke_test,
+        )
+
+        run_threading_smoke_test()
+        return
 
     try:
         from rekordbox_compatibility_converter.gui.modern_app import main as modern_main

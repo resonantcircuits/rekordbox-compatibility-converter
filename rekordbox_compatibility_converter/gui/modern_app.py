@@ -2,11 +2,13 @@
 
 import json
 import os
+import queue
 import sys
 import threading
+import time
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Callable, Dict, Optional
 
 import customtkinter as ctk
 import tkinter as tk
@@ -163,7 +165,24 @@ class ModernRekordboxGUI(ctk.CTk):
         self._build_ui()
         self._apply_treeview_theme("dark")
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._ui_queue = queue.Queue()
+        self._ui_poll_id = self.after(25, self._drain_ui_queue)
         self._refresh_drives()
+
+    def _post_to_ui(self, callback: Callable, *args) -> None:
+        """Queue work for the Tk-owning thread without calling Tcl here."""
+        self._ui_queue.put((callback, args))
+
+    def _drain_ui_queue(self) -> None:
+        """Run queued worker results from the Tk event-loop thread."""
+        try:
+            while True:
+                callback, args = self._ui_queue.get_nowait()
+                callback(*args)
+        except queue.Empty:
+            pass
+        finally:
+            self._ui_poll_id = self.after(25, self._drain_ui_queue)
 
     @staticmethod
     def _load_preferences() -> Dict[str, bool]:
@@ -906,6 +925,7 @@ class ModernRekordboxGUI(ctk.CTk):
                 "USB until the completion message appears.",
             )
             return
+        self.after_cancel(self._ui_poll_id)
         self.destroy()
 
     def _refresh_drives(self):
@@ -1013,11 +1033,13 @@ class ModernRekordboxGUI(ctk.CTk):
                 )
             except Exception as e:
                 msg = str(e)
-                self.after(0, lambda m=msg, g=scan_generation: self._on_scan_error(m, g))
+                self._post_to_ui(self._on_scan_error, msg, scan_generation)
                 return
-            self.after(
-                0,
-                lambda s=summary, g=scan_generation, p=usb_path: self._accept_scan_result(g, p, s),
+            self._post_to_ui(
+                self._accept_scan_result,
+                scan_generation,
+                usb_path,
+                summary,
             )
 
         threading.Thread(target=run, daemon=True).start()
@@ -1311,11 +1333,12 @@ class ModernRekordboxGUI(ctk.CTk):
                 def on_prog(task, cur, total_count):
                     pct = cur / total_count
                     filename = task.track.filename
-                    self.after(
-                        0,
-                        lambda p=pct, n=filename, c=cur, t=total_count: self._update_prog(
-                            p, n, c, t
-                        ),
+                    self._post_to_ui(
+                        self._update_prog,
+                        pct,
+                        filename,
+                        cur,
+                        total_count,
                     )
 
                 result = self.engine.execute(
@@ -1331,11 +1354,13 @@ class ModernRekordboxGUI(ctk.CTk):
                 )
             except Exception as e:
                 msg = str(e)
-                self.after(0, lambda m=msg: self._on_conversion_error(m))
+                self._post_to_ui(self._on_conversion_error, msg)
                 return
-            self.after(
-                0,
-                lambda r=result, s=conversion_summary, d=delete_original: self._on_finish(r, s, d),
+            self._post_to_ui(
+                self._on_finish,
+                result,
+                conversion_summary,
+                delete_original,
             )
 
         threading.Thread(target=run, daemon=True).start()
@@ -1496,9 +1521,9 @@ class ModernRekordboxGUI(ctk.CTk):
             try:
                 plan = self.engine.plan_retained_original_cleanup(usb_path)
             except Exception as exc:
-                self.after(0, lambda m=str(exc): self._on_cleanup_error(m))
+                self._post_to_ui(self._on_cleanup_error, str(exc))
                 return
-            self.after(0, lambda p=plan: self._confirm_original_cleanup(p))
+            self._post_to_ui(self._confirm_original_cleanup, plan)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1550,9 +1575,9 @@ class ModernRekordboxGUI(ctk.CTk):
             try:
                 result = self.engine.cleanup_retained_originals(plan)
             except Exception as exc:
-                self.after(0, lambda m=str(exc): self._on_cleanup_error(m))
+                self._post_to_ui(self._on_cleanup_error, str(exc))
                 return
-            self.after(0, lambda r=result: self._on_cleanup_finish(r))
+            self._post_to_ui(self._on_cleanup_finish, result)
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1658,6 +1683,52 @@ class ModernRekordboxGUI(ctk.CTk):
             self._start_scan()
         else:
             messagebox.showerror("Error", msg)
+
+
+def run_threading_smoke_test() -> None:
+    """Exercise worker-to-main-thread delivery against the bundled Tcl/Tk."""
+    app = ModernRekordboxGUI()
+    app.withdraw()
+    expected_callbacks = 2000
+    callback_threads = []
+    worker_thread_id = []
+    timed_out = []
+    deadline = time.monotonic() + 10
+
+    def record_callback() -> None:
+        callback_threads.append(threading.get_ident())
+
+    def post_callbacks() -> None:
+        worker_thread_id.append(threading.get_ident())
+        for _ in range(expected_callbacks):
+            app._post_to_ui(record_callback)
+
+    worker = threading.Thread(target=post_callbacks, daemon=True)
+    worker.start()
+
+    def check_completion() -> None:
+        if len(callback_threads) == expected_callbacks and not worker.is_alive():
+            app._on_close()
+            return
+        if time.monotonic() >= deadline:
+            timed_out.append(True)
+            app._on_close()
+            return
+        app.after(10, check_completion)
+
+    app.after(10, check_completion)
+    app.mainloop()
+    worker.join(timeout=1)
+
+    if timed_out or len(callback_threads) != expected_callbacks:
+        raise RuntimeError(
+            "Tk worker-delivery smoke test timed out: "
+            f"received {len(callback_threads)} of {expected_callbacks} callbacks"
+        )
+    if not worker_thread_id or any(
+        thread_id == worker_thread_id[0] for thread_id in callback_threads
+    ):
+        raise RuntimeError("A Tk callback ran on the posting worker thread")
 
 
 def main():

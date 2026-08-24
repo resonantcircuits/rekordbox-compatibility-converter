@@ -193,7 +193,9 @@ jobs:
 
       - name: Smoke-test macOS App
         if: matrix.platform == 'macos'
-        run: env PATH=/usr/bin:/bin:/usr/sbin:/sbin dist/RekordboxFormatChecker.app/Contents/MacOS/RekordboxFormatChecker
+        run: |
+          env PATH=/usr/bin:/bin:/usr/sbin:/sbin RBCONVERT_SMOKE_TEST=gui-threading dist/RekordboxFormatChecker.app/Contents/MacOS/RekordboxFormatChecker
+          env PATH=/usr/bin:/bin:/usr/sbin:/sbin RBCONVERT_SMOKE_TEST=conversion dist/RekordboxFormatChecker.app/Contents/MacOS/RekordboxFormatChecker
 
       - name: Package macOS App
         if: matrix.platform == 'macos'
@@ -211,8 +213,12 @@ jobs:
         shell: pwsh
         run: |
           $env:Path = "$env:SystemRoot\System32"
+          $env:RBCONVERT_SMOKE_TEST = "gui-threading"
           $process = Start-Process -FilePath "dist/RekordboxFormatChecker.exe" -Wait -PassThru
-          if ($process.ExitCode -ne 0) { throw "Packaged application exited with code $($process.ExitCode)" }
+          if ($process.ExitCode -ne 0) { throw "Packaged GUI threading smoke test exited with code $($process.ExitCode)" }
+          $env:RBCONVERT_SMOKE_TEST = "conversion"
+          $process = Start-Process -FilePath "dist/RekordboxFormatChecker.exe" -Wait -PassThru
+          if ($process.ExitCode -ne 0) { throw "Packaged conversion smoke test exited with code $($process.ExitCode)" }
 
       - name: Package Windows Exe
         if: matrix.platform == 'windows'
