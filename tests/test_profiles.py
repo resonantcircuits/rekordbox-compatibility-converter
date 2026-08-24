@@ -99,11 +99,21 @@ def test_maximum_profile_rejects_48khz_aiff():
     assert profile.evaluate(track).is_compatible is False
 
 
-def test_modern_profile_accepts_fla_extension():
+def test_modern_profile_accepts_fla_extension_at_shared_48khz_limit():
     profile = get_profile(CompatibilityProfileType.MODERN)
-    track = TrackInfo(id=8, filename="track.fla", sample_rate=96000, sample_depth=24)
+    track = TrackInfo(id=8, filename="track.fla", sample_rate=48000, sample_depth=24)
 
     assert profile.evaluate(track).is_compatible is True
+
+
+def test_modern_profile_normalizes_96khz_for_cross_device_safety():
+    profile = get_profile(CompatibilityProfileType.MODERN)
+    track = TrackInfo(id=14, filename="track.flac", sample_rate=96000, sample_depth=24)
+
+    result = profile.evaluate(track)
+
+    assert result.is_compatible is False
+    assert result.suggested_sample_rate == 48000
 
 
 def test_standard_and_modern_profiles_accept_aac_in_mp4_container():

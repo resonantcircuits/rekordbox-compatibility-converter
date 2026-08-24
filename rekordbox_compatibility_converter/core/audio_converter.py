@@ -95,6 +95,32 @@ class AudioConverter:
                 "size": file_path.stat().st_size if file_path.exists() else 0,
             }
 
+    def decoded_audio_sha256(self, file_path: Path) -> str:
+        """Hash decoded audio frames so equivalent files can be compared safely."""
+        cmd = [
+            self.ffmpeg_bin,
+            "-v", "error",
+            "-i", str(file_path),
+            "-map", "0:a:0",
+            "-vn",
+            "-sn",
+            "-dn",
+            "-f", "hash",
+            "-hash", "sha256",
+            "-",
+        ]
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True,
+        )
+        output = result.stdout.strip()
+        if not output.startswith("SHA256="):
+            raise ValueError(f"FFmpeg returned an invalid decoded-audio hash: {output}")
+        return output.removeprefix("SHA256=").strip().lower()
+
     def convert(
         self,
         source_path: Path,

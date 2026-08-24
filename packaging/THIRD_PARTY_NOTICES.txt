@@ -1,18 +1,37 @@
 Third-party notices for Rekordbox Format Checker
 
-FFmpeg and ffprobe
-------------------
+FFmpeg and ffprobe (LGPL 2.1 or later)
+--------------------------------------
 
 This application distributes FFmpeg and ffprobe as separate executable tools.
 FFmpeg is copyright the FFmpeg developers and is not part of the Rekordbox
 Format Checker MIT-licensed source code.
 
-The exact FFmpeg version, build configuration, and applicable license are
+The exact FFmpeg version, minimal build configuration, and applicable licence are
 recorded in licenses/ffmpeg/FFMPEG_BUILD_INFO.txt. A copy of the license
 reported by that build is included in the same directory.
 
-FFmpeg source code and release archives are available from:
-https://ffmpeg.org/download.html
+The exact corresponding source archive and reproducible build script are
+distributed alongside each application download. See SOURCE_OFFER.txt for the
+archive name and location.
 
 FFmpeg licensing information is available from:
 https://ffmpeg.org/legal.html
+
+LAME (LGPL 2.0 or later)
+------------------------
+
+The minimal FFmpeg build uses LAME to produce 320 kbps MP3 output. LAME is
+copyright its contributors and is licensed separately under the GNU Lesser
+General Public License. Its licence is included in licenses/lame.
+
+LAME source code is included in the corresponding-source archive distributed
+alongside each application download.
+
+Python and GUI dependencies
+---------------------------
+
+Packaged desktop applications also contain the Python and Tcl/Tk runtimes,
+CustomTkinter, darkdetect, and packaging. Their copyright and licence texts are
+included under licenses/python, licenses/tcl-tk, and licenses/python-packages.
+These projects are independent from and do not endorse Rekordbox Format Checker.

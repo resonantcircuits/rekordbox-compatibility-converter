@@ -2,7 +2,9 @@
 
 import os
 import shutil
+import subprocess
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_all
@@ -39,20 +41,115 @@ def required_file(environment_name):
     return str(Path(configured).resolve())
 
 
+def required_directory(environment_name):
+    configured = os.environ.get(environment_name)
+    if not configured or not Path(configured).is_dir():
+        raise RuntimeError(f"Set {environment_name} to an existing directory before building")
+    return str(Path(configured).resolve())
+
+
+def generate_ffmpeg_build_info(ffmpeg_path):
+    """Record details from the exact FFmpeg executable being bundled."""
+    result = subprocess.run(
+        [ffmpeg_path, "-version"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=True,
+    )
+    if not result.stdout.lower().startswith("ffmpeg version "):
+        raise RuntimeError(f"Could not read FFmpeg build information from {ffmpeg_path}")
+    metadata_dir = Path(workpath) / "ffmpeg-metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    build_info_path = metadata_dir / "FFMPEG_BUILD_INFO.txt"
+    build_info_path.write_text(result.stdout, encoding="utf-8")
+    return str(build_info_path)
+
+
+def generate_source_offer():
+    """Describe the corresponding-source artifact shipped beside this build."""
+    archive_name = os.environ.get(
+        "RBCONVERT_SOURCE_ARCHIVE_NAME",
+        "RekordboxFormatChecker-FFmpeg-Sources.tar.gz",
+    )
+    download_url = os.environ.get(
+        "RBCONVERT_SOURCE_DOWNLOAD_URL",
+        "https://github.com/resonantcircuits/rekordbox-compatibility-converter/releases",
+    )
+    metadata_dir = Path(workpath) / "ffmpeg-metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    offer_path = metadata_dir / "SOURCE_OFFER.txt"
+    offer_path.write_text(
+        "Corresponding source for bundled FFmpeg and LAME\n\n"
+        f"Archive distributed alongside this application: {archive_name}\n"
+        f"Download location: {download_url}\n\n"
+        "The archive contains the exact upstream source archives, pinned checksums, "
+        "licences, and build script used for this application. Access is provided "
+        "at no additional charge.\n",
+        encoding="utf-8",
+    )
+    return str(offer_path)
+
+
+def distribution_licences(distribution_name):
+    """Collect licence files from a bundled Python distribution."""
+    package = distribution(distribution_name)
+    collected = []
+    for relative_path in package.files or ():
+        filename = Path(str(relative_path)).name.lower()
+        if filename.startswith(("license", "copying")):
+            source = Path(package.locate_file(relative_path)).resolve()
+            if source.is_file():
+                collected.append(
+                    (str(source), f"licenses/python-packages/{distribution_name}")
+                )
+    if not collected:
+        raise RuntimeError(f"Could not find licence files for {distribution_name}")
+    return collected
+
+
+def python_runtime_licence():
+    candidates = (
+        Path(sys.base_prefix) / "LICENSE.txt",
+        Path(sys.base_prefix) / "Lib" / "LICENSE.txt",
+        Path(sys.base_prefix) / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "LICENSE.txt",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate.resolve())
+    raise RuntimeError("Could not find the Python runtime licence")
+
+
+def tcl_tk_licence():
+    for candidate in Path(sys.base_prefix).rglob("license.terms"):
+        lowered_parts = {part.lower() for part in candidate.parts}
+        if any(part.startswith(("tcl", "tk")) for part in lowered_parts):
+            return str(candidate.resolve())
+    raise RuntimeError("Could not find the Tcl/Tk runtime licence")
+
+
 VERSION = project_version()
 VERSION_PARTS = tuple(int(part) for part in VERSION.split("."))
 FILE_VERSION = (VERSION_PARTS + (0, 0, 0, 0))[:4]
 
 ctk_datas, ctk_binaries, ctk_hiddenimports = collect_all("customtkinter")
+ffmpeg_path = required_tool("ffmpeg")
 runtime_binaries = ctk_binaries + [
-    (required_tool("ffmpeg"), "."),
+    (ffmpeg_path, "."),
     (required_tool("ffprobe"), "."),
 ]
 runtime_data = ctk_datas + [
     (str(PROJECT_ROOT / "packaging" / "THIRD_PARTY_NOTICES.txt"), "."),
-    (required_file("RBCONVERT_FFMPEG_LICENSE_PATH"), "licenses/ffmpeg"),
-    (required_file("RBCONVERT_FFMPEG_BUILD_INFO_PATH"), "licenses/ffmpeg"),
+    (str(PROJECT_ROOT / "LICENSE"), "licenses/rekordbox"),
+    (required_directory("RBCONVERT_FFMPEG_LEGAL_DIR"), "licenses"),
+    (generate_ffmpeg_build_info(ffmpeg_path), "licenses/ffmpeg"),
+    (generate_source_offer(), "."),
 ]
+runtime_data += distribution_licences("customtkinter")
+runtime_data += distribution_licences("darkdetect")
+runtime_data += distribution_licences("packaging")
+runtime_data.append((python_runtime_licence(), "licenses/python"))
+runtime_data.append((tcl_tk_licence(), "licenses/tcl-tk"))
 
 a = Analysis(
     [str(PROJECT_ROOT / "rekordbox_compatibility_converter" / "gui" / "app.py")],

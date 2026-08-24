@@ -1,5 +1,6 @@
 """Tests for the desktop GUI entrypoint."""
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -81,6 +82,56 @@ def test_gui_entrypoint_launches_normally(monkeypatch):
     app.main()
 
     assert launches == [True]
+
+
+def test_guidance_preference_is_persisted(tmp_path, monkeypatch):
+    preferences = tmp_path / "preferences.json"
+    monkeypatch.setattr(modern_app, "PREFERENCES_PATH", preferences)
+    gui = SimpleNamespace(
+        preferences={},
+        show_guidance_var=SimpleNamespace(get=lambda: False),
+    )
+
+    ModernRekordboxGUI._save_preferences(gui)
+
+    assert json.loads(preferences.read_text(encoding="utf-8")) == {
+        "show_guidance_dialogs": False
+    }
+    assert modern_app.GUIDANCE_SETTING_LABEL == "Show guidance popups"
+
+
+def test_help_text_keeps_compatibility_and_onelibrary_workflow_accessible():
+    expected_fields = {
+        "name",
+        "best_for",
+        "keeps",
+        "pcm_limits",
+        "converts",
+        "models",
+        "note",
+    }
+    assert len(modern_app.PROFILE_GUIDE) == 3
+    assert all(set(profile) == expected_fields for profile in modern_app.PROFILE_GUIDE)
+    assert "CDJ-350" in modern_app.COVERED_BASELINE_MODELS
+    assert "CDJ-3000X" in modern_app.COVERED_BASELINE_MODELS
+    assert "XDJ-AZ" in modern_app.COVERED_BASELINE_MODELS
+    assert "OMNIS-DUO" in modern_app.COVERED_BASELINE_MODELS
+    assert "XDJ-1000MK2" in modern_app.MODERN_LOSSLESS_MODELS
+    assert "XDJ-RX3" not in modern_app.MODERN_LOSSLESS_MODELS
+    assert "Convert from Device Library" in modern_app.WORKFLOW_HELP
+
+
+def test_about_documents_expose_application_and_third_party_terms(monkeypatch):
+    monkeypatch.setattr(modern_app.sys, "frozen", False, raising=False)
+
+    documents = ModernRekordboxGUI._legal_documents()
+
+    assert "Third-Party Notices" in documents
+    assert "Application MIT Licence" in documents
+    assert "Corresponding Source" in documents
+    assert "FFmpeg" in documents["Third-Party Notices"]
+    assert "MIT License" in documents["Application MIT Licence"]
+    assert "exact, unmodified upstream source" in documents["Corresponding Source"]
 
 
 def test_conversion_start_is_immediately_visible():

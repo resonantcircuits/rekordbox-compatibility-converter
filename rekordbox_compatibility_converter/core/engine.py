@@ -18,6 +18,7 @@ from .dlp_manager import (
     ONELIBRARY_PRESENT_MESSAGE,
     ONELIBRARY_REBUILD_REQUIRED_MESSAGE,
 )
+from .local_backup import LocalBackupSession
 from .models import (
     ConversionTask,
     OriginalCleanupCandidate,
@@ -53,29 +54,58 @@ class ConversionEngine:
         return str(path.resolve(strict=False)).casefold()
 
     @staticmethod
-    def estimate_required_space(summary: ScanSummary, backup: bool = True) -> int:
-        """Estimates peak USB space for staged outputs and atomic metadata updates."""
-        required_space = 0
-        for task in summary.tasks:
-            if task.track.duration > 0:
-                if task.target_format == TargetFormat.MP3:
-                    output_estimate = int(task.track.duration * 320000 / 8)
-                else:
-                    output_estimate = int(
-                        task.track.duration
-                        * task.target_sample_rate
-                        * max(1, task.track.channels)
-                        * task.target_sample_depth
-                        / 8
-                    )
-            elif task.source_abs_path.is_file():
-                output_estimate = max(
-                    task.source_abs_path.stat().st_size * 3,
-                    1024 * 1024,
-                )
+    def _estimated_output_size(task: ConversionTask) -> int:
+        """Return a conservative staged-output estimate for one task."""
+        if task.track.duration > 0:
+            if task.target_format == TargetFormat.MP3:
+                output_estimate = int(task.track.duration * 320000 / 8)
             else:
-                output_estimate = 1024 * 1024
-            required_space += int(output_estimate * 1.05) + 1024 * 1024
+                output_estimate = int(
+                    task.track.duration
+                    * task.target_sample_rate
+                    * max(1, task.track.channels)
+                    * task.target_sample_depth
+                    / 8
+                )
+        elif task.source_abs_path.is_file():
+            output_estimate = max(
+                task.source_abs_path.stat().st_size * 3,
+                1024 * 1024,
+            )
+        else:
+            output_estimate = 1024 * 1024
+        return int(output_estimate * 1.05) + 1024 * 1024
+
+    @classmethod
+    def estimate_required_space(
+        cls,
+        summary: ScanSummary,
+        backup: bool = True,
+        local_original_backup: bool = False,
+    ) -> int:
+        """Estimates peak USB space for staged outputs and atomic metadata updates."""
+        output_bytes = sum(cls._estimated_output_size(task) for task in summary.tasks)
+        source_paths = {
+            task.source_abs_path.resolve()
+            for task in summary.tasks
+            if task.source_abs_path.is_file()
+        }
+        source_bytes = sum(path.stat().st_size for path in source_paths)
+        preexisting_target_paths = {
+            task.target_abs_path.resolve()
+            for task in summary.tasks
+            if task.target_abs_path.is_file()
+            and task.existing_target_track_id is None
+            and cls._path_key(task.target_abs_path) != cls._path_key(task.source_abs_path)
+        }
+        preexisting_target_bytes = sum(
+            path.stat().st_size for path in preexisting_target_paths
+        )
+        required_space = (
+            max(0, output_bytes - source_bytes - preexisting_target_bytes)
+            if local_original_backup
+            else output_bytes
+        )
 
         sidecar_bytes = sum(
             path.stat().st_size
@@ -95,9 +125,49 @@ class ConversionEngine:
 
         # Atomic rewrites need temporary copies even without persistent .bak files.
         required_space += pdb_bytes + sidecar_bytes
-        if backup:
+        if backup and not local_original_backup:
             required_space += pdb_bytes + sidecar_bytes
         return required_space
+
+    @staticmethod
+    def estimate_local_backup_space(summary: ScanSummary) -> int:
+        """Estimate local capacity for originals, metadata snapshots, and a margin."""
+        source_paths = {
+            task.source_abs_path.resolve()
+            for task in summary.tasks
+            if task.source_abs_path.is_file()
+        }
+        source_bytes = sum(path.stat().st_size for path in source_paths)
+        preexisting_target_paths = {
+            task.target_abs_path.resolve()
+            for task in summary.tasks
+            if task.target_abs_path.is_file()
+            and task.existing_target_track_id is None
+            and ConversionEngine._path_key(task.target_abs_path)
+            != ConversionEngine._path_key(task.source_abs_path)
+        }
+        preexisting_target_bytes = sum(
+            path.stat().st_size for path in preexisting_target_paths
+        )
+        metadata_paths = {
+            path.resolve()
+            for task in summary.tasks
+            for path in (task.anlz_dat_path, task.anlz_ext_path, task.anlz_2ex_path)
+            if path and path.is_file()
+        }
+        pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
+        if pdb_path.is_file():
+            metadata_paths.add(pdb_path.resolve())
+        for dlp_path in (
+            summary.usb_root / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
+            summary.usb_root / "PIONEER" / "rekordbox" / "exportLibrary.db",
+        ):
+            if dlp_path.is_file():
+                metadata_paths.add(dlp_path.resolve())
+        metadata_bytes = sum(path.stat().st_size for path in metadata_paths)
+        return int(
+            (source_bytes + preexisting_target_bytes + metadata_bytes) * 1.02
+        ) + 1024 * 1024
 
     @staticmethod
     def _restore_file_bytes(path: Path, data: bytes) -> None:
@@ -143,6 +213,7 @@ class ConversionEngine:
         forced_target_format: Optional[TargetFormat] = None,
         forced_sample_rate: Optional[int] = None,
         forced_sample_depth: Optional[int] = None,
+        enforce_pcm_16_bit: bool = False,
         allow_onelibrary_bridge: bool = False,
     ) -> ScanSummary:
         """Scans a Rekordbox USB drive and builds an actionable conversion plan."""
@@ -206,6 +277,23 @@ class ConversionEngine:
                     track.channels = int(probe.get("channels") or 2)
 
             check = profile.evaluate(track)
+            lossless_depth_format = track.extension in {
+                "aif",
+                "aiff",
+                "wav",
+                "wave",
+                "flac",
+                "fla",
+            } or track.codec_name.lower() == "alac"
+            if (
+                enforce_pcm_16_bit
+                and lossless_depth_format
+                and track.sample_depth != 16
+            ):
+                check.is_compatible = False
+                check.reasons.append(
+                    "The selected 16-bit policy requires all lossless audio to be 16-bit."
+                )
             if check.is_compatible:
                 summary.compatible_tracks += 1
             else:
@@ -213,7 +301,11 @@ class ConversionEngine:
 
                 target_fmt = forced_target_format or check.suggested_target_format
                 target_sr = forced_sample_rate or check.suggested_sample_rate
-                target_sd = forced_sample_depth or check.suggested_sample_depth
+                target_sd = (
+                    16
+                    if enforce_pcm_16_bit
+                    else forced_sample_depth or check.suggested_sample_depth
+                )
                 if target_fmt == TargetFormat.MP3:
                     target_sd = 16
 
@@ -294,7 +386,24 @@ class ConversionEngine:
                         estimate = int(track.duration * target_sr * 2 * target_sd / 8)
                     summary.estimated_extra_bytes += estimate
 
+        database_path_owners = {
+            self._path_key(usb_root / track.file_path.lstrip("/")): track.id
+            for track in pdb_manager.tracks
+            if track.file_path
+        }
+        for task in summary.tasks:
+            if task.target_abs_path.is_file():
+                task.existing_target_track_id = database_path_owners.get(
+                    self._path_key(task.target_abs_path)
+                )
+
         summary.required_space_bytes = self.estimate_required_space(summary, backup=True)
+        summary.required_space_with_local_backup_bytes = self.estimate_required_space(
+            summary,
+            backup=True,
+            local_original_backup=True,
+        )
+        summary.local_backup_required_space_bytes = self.estimate_local_backup_space(summary)
         return summary
 
     def plan_retained_original_cleanup(self, usb_root: Path) -> OriginalCleanupPlan:
@@ -771,8 +880,10 @@ class ConversionEngine:
         clean_dotfiles: bool = True,
         progress_callback: Optional[Callable[[ConversionTask, int, int], None]] = None,
         allow_onelibrary_bridge: bool = False,
+        local_original_backup_dir: Optional[Path] = None,
+        replace_existing_targets: bool = False,
     ) -> dict:
-        """Executes staged conversions and commits each track before deleting its source."""
+        """Execute conversion, optionally archiving originals off the USB first."""
         pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
         if not pdb_path.is_file():
             return {"success": False, "error": "export.pdb not found."}
@@ -797,12 +908,20 @@ class ConversionEngine:
             }
 
         if summary.onelibrary_bridge_mode:
-            if delete_original:
+            if local_original_backup_dir and not delete_original:
+                return {
+                    "success": False,
+                    "error": "The OneLibrary local-backup workflow must remove archived originals from the USB.",
+                    "total": len(summary.tasks),
+                    "completed": 0,
+                    "failed": len(summary.tasks),
+                }
+            if not local_original_backup_dir and delete_original:
                 return {
                     "success": False,
                     "error": (
                         "The experimental OneLibrary bridge requires retaining all original "
-                        "audio files until Rekordbox has rebuilt and verified OneLibrary."
+                        "audio files unless a verified local original backup folder is provided."
                     ),
                     "total": len(summary.tasks),
                     "completed": 0,
@@ -816,6 +935,14 @@ class ConversionEngine:
                     "completed": 0,
                     "failed": len(summary.tasks),
                 }
+        elif local_original_backup_dir and not delete_original:
+            return {
+                "success": False,
+                "error": "A local original backup can only be used when originals are removed from the USB.",
+                "total": len(summary.tasks),
+                "completed": 0,
+                "failed": len(summary.tasks),
+            }
 
         try:
             pdb_manager = PDBManager(pdb_path)
@@ -835,10 +962,17 @@ class ConversionEngine:
         total_tasks = len(summary.tasks)
         preflight_errors: List[str] = []
         target_owners: Dict[str, ConversionTask] = {}
+        use_local_original_backup = local_original_backup_dir is not None
+        database_path_owners = {
+            self._path_key(summary.usb_root / track.file_path.lstrip("/")): track.id
+            for track in pdb_manager.tracks
+            if track.file_path
+        }
 
         for task in summary.tasks:
             task.status = "pending"
             task.error = None
+            task.reuse_existing_target = False
             source = task.source_abs_path
             target = task.target_abs_path
             source_key = self._path_key(source)
@@ -893,8 +1027,6 @@ class ConversionEngine:
                     "Cannot keep the original when conversion must replace the same WAV/AIFF path. "
                     "Choose a different target format or allow replacement."
                 )
-            elif source_key != target_key and target.exists():
-                task.error = f"Refusing to overwrite existing target: {target}"
             elif target_key in target_owners:
                 other = target_owners[target_key]
                 task.error = (
@@ -903,6 +1035,21 @@ class ConversionEngine:
                 if not other.error:
                     other.error = task.error
                     preflight_errors.append(other.error)
+            elif source_key != target_key and target.exists():
+                referenced_track_id = database_path_owners.get(target_key)
+                task.existing_target_track_id = referenced_track_id
+                if not use_local_original_backup:
+                    task.error = (
+                        "An existing target can only be resolved with a verified local "
+                        f"backup enabled: {target}"
+                    )
+                elif not replace_existing_targets:
+                    task.error = (
+                        "Existing target requires explicit reuse or replacement "
+                        f"confirmation: {target}"
+                    )
+                elif referenced_track_id is not None:
+                    task.reuse_existing_target = True
             elif not pdb_manager.can_fit_strings(task.track, task.target_filename, task.target_usb_path):
                 task.error = (
                     f"Cannot patch export.pdb: '{task.target_filename}' does not fit the existing "
@@ -958,9 +1105,43 @@ class ConversionEngine:
                 "cleaned_dotfiles": 0,
             }
 
-        # Parallel workers can have every converted output staged at once, so
-        # deletion of originals cannot be counted as space available up front.
-        required_space = self.estimate_required_space(summary, backup=backup)
+        local_backup_base: Optional[Path] = None
+        if local_original_backup_dir is not None:
+            try:
+                local_backup_base = LocalBackupSession.validate_destination(
+                    local_original_backup_dir,
+                    summary.usb_root,
+                )
+                local_required = self.estimate_local_backup_space(summary)
+                local_free = shutil.disk_usage(local_backup_base).free
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "error": f"Local original backup is unavailable: {exc}",
+                    "total": total_tasks,
+                    "completed": 0,
+                    "failed": total_tasks,
+                    "cleaned_dotfiles": 0,
+                }
+            if local_required > local_free:
+                return {
+                    "success": False,
+                    "error": (
+                        "Insufficient local backup space: approximately "
+                        f"{local_required / (1024 ** 2):.1f} MiB required, "
+                        f"{local_free / (1024 ** 2):.1f} MiB available."
+                    ),
+                    "total": total_tasks,
+                    "completed": 0,
+                    "failed": total_tasks,
+                    "cleaned_dotfiles": 0,
+                }
+
+        required_space = self.estimate_required_space(
+            summary,
+            backup=backup,
+            local_original_backup=use_local_original_backup,
+        )
 
         try:
             free_space = shutil.disk_usage(summary.usb_root).free
@@ -980,8 +1161,43 @@ class ConversionEngine:
                 "cleaned_dotfiles": 0,
             }
 
-        # Initial backup
-        if backup:
+        local_session: Optional[LocalBackupSession] = None
+        if local_backup_base is not None:
+            metadata_paths = {pdb_path}
+            metadata_paths.update(
+                path
+                for task in summary.tasks
+                for path in (task.anlz_dat_path, task.anlz_ext_path, task.anlz_2ex_path)
+                if path and path.is_file()
+            )
+            for dlp_path in (
+                summary.usb_root / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
+                summary.usb_root / "PIONEER" / "rekordbox" / "exportLibrary.db",
+            ):
+                if dlp_path.is_file():
+                    metadata_paths.add(dlp_path)
+            try:
+                local_session = LocalBackupSession.create(
+                    local_backup_base,
+                    summary.usb_root,
+                    summary.pdb_sha256,
+                )
+                local_session.archive(summary.tasks, metadata_paths)
+                local_session.remove_originals_from_usb()
+            except Exception as exc:
+                return {
+                    "success": False,
+                    "error": f"Could not create verified local original backup: {exc}",
+                    "total": total_tasks,
+                    "completed": 0,
+                    "failed": total_tasks,
+                    "cleaned_dotfiles": 0,
+                    "local_backup_session": str(local_session.path) if local_session else "",
+                }
+
+        # USB-side metadata backups remain the compatibility path when no
+        # complete local recovery archive was requested.
+        if backup and local_session is None:
             try:
                 pdb_manager.save(backup=True)
                 backed_up_paths = set()
@@ -1012,7 +1228,11 @@ class ConversionEngine:
             )
             staged_paths[id(task)] = stage
             success, new_size, err = self.audio_converter.convert(
-                source_path=task.source_abs_path,
+                source_path=(
+                    local_session.archived_path(task.source_abs_path)
+                    if local_session
+                    else task.source_abs_path
+                ),
                 target_path=stage,
                 target_format=task.target_format,
                 sample_rate=task.target_sample_rate,
@@ -1021,6 +1241,13 @@ class ConversionEngine:
             if not success:
                 task.status = "failed"
                 task.error = err
+                if local_session:
+                    try:
+                        local_session.restore_task_after_failure(task)
+                    except Exception as restore_exc:
+                        task.warnings.append(
+                            f"Could not restore task files from local backup: {restore_exc}"
+                        )
                 return False
             task.new_file_size = new_size
             task.output_probe = self.audio_converter.probe(stage)
@@ -1062,8 +1289,26 @@ class ConversionEngine:
                     summary.usb_root, target
                 ):
                     raise RuntimeError("A source or target path became unsafe during conversion")
-                if not same_path and target.exists():
+                if task.reuse_existing_target and not target.is_file():
+                    raise RuntimeError(
+                        f"Referenced target disappeared during conversion: {target}"
+                    )
+                if not task.reuse_existing_target and not same_path and target.exists():
                     raise RuntimeError(f"Target appeared during conversion; refusing to overwrite: {target}")
+                if task.reuse_existing_target:
+                    staged_hash = self.audio_converter.decoded_audio_sha256(stage)
+                    existing_hash = self.audio_converter.decoded_audio_sha256(target)
+                    if staged_hash != existing_hash:
+                        raise RuntimeError(
+                            "Existing referenced target is not audio-identical to the requested "
+                            f"conversion; refusing reuse: {target}"
+                        )
+                    task.new_file_size = target.stat().st_size
+                    task.output_probe = self.audio_converter.probe(target)
+                    if task.output_probe.get("probe_error"):
+                        raise RuntimeError(
+                            f"Existing target failed verification: {task.output_probe['probe_error']}"
+                        )
                 if track_snapshot["file_path"] != task.target_usb_path:
                     for anlz_path in (
                         task.anlz_dat_path,
@@ -1075,13 +1320,14 @@ class ConversionEngine:
                                 f"ANLZ file changed while conversion was running: {anlz_path}"
                             )
                 target.parent.mkdir(parents=True, exist_ok=True)
-                if same_path:
+                if same_path and local_session is None:
                     source_backup = source.with_name(
                         f".{source.name}.rbconvert-original-{uuid.uuid4().hex}"
                     )
                     os.replace(source, source_backup)
-                os.replace(stage, target)
-                self._sync_directory(target.parent)
+                if not task.reuse_existing_target:
+                    os.replace(stage, target)
+                    self._sync_directory(target.parent)
 
                 actual_rate = int(task.output_probe.get("sample_rate") or task.target_sample_rate)
                 if task.target_format == TargetFormat.MP3:
@@ -1129,7 +1375,9 @@ class ConversionEngine:
                             raise RuntimeError(f"Could not update PPTH path in {anlz_path}")
                         updated_anlz_paths += 1
 
-                if delete_original:
+                if local_session:
+                    local_session.mark_converted(task)
+                elif delete_original:
                     obsolete = source_backup if same_path else source
                     if obsolete:
                         try:
@@ -1170,7 +1418,11 @@ class ConversionEngine:
 
                 if rollback_saved:
                     try:
-                        if same_path and source_backup and source_backup.exists():
+                        if local_session:
+                            if not task.reuse_existing_target:
+                                target.unlink(missing_ok=True)
+                            local_session.restore_task_after_failure(task)
+                        elif same_path and source_backup and source_backup.exists():
                             target.unlink(missing_ok=True)
                             os.replace(source_backup, source)
                         elif not same_path:
@@ -1199,6 +1451,13 @@ class ConversionEngine:
                 except Exception as exc:
                     task.status = "failed"
                     task.error = f"Unexpected conversion error: {exc}"
+                    if local_session:
+                        try:
+                            local_session.restore_source_after_failure(task.source_abs_path)
+                        except Exception as restore_exc:
+                            warnings.append(
+                                f"Could not restore {task.source_abs_path} from local backup: {restore_exc}"
+                            )
                     is_ok = False
                 if is_ok:
                     completed += 1
@@ -1220,8 +1479,17 @@ class ConversionEngine:
         if summary.onelibrary_bridge_mode and completed:
             warnings.insert(0, ONELIBRARY_REBUILD_REQUIRED_MESSAGE)
 
+        local_session_error = ""
+        if local_session:
+            try:
+                local_session.finish(failed == 0)
+            except Exception as exc:
+                local_session_error = f"Could not finalize local recovery manifest: {exc}"
+                warnings.append(local_session_error)
+
         return {
-            "success": failed == 0,
+            "success": failed == 0 and not local_session_error,
+            "error": local_session_error,
             "total": total_tasks,
             "completed": completed,
             "failed": failed,
@@ -1231,4 +1499,15 @@ class ConversionEngine:
             "onelibrary_sync_required": bool(
                 summary.onelibrary_bridge_mode and completed
             ),
+            "local_backup_session": str(local_session.path) if local_session else "",
         }
+
+    def restore_local_backup(
+        self, session_dir: Path, usb_root: Optional[Path] = None
+    ) -> Tuple[bool, str]:
+        """Restore audio, Device Library, OneLibrary, and ANLZ from a local archive."""
+        try:
+            session = LocalBackupSession.load(session_dir)
+        except Exception as exc:
+            return False, f"Could not load local backup session: {exc}"
+        return session.restore_to_usb(usb_root)

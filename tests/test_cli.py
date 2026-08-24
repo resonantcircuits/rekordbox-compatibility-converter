@@ -15,6 +15,14 @@ def test_scan_missing_database_returns_nonzero(tmp_path):
     assert "export.pdb" in result.output
 
 
+def test_convert_help_exposes_whole_library_16_bit_policy():
+    result = CliRunner().invoke(cli, ["convert", "--help"])
+
+    assert result.exit_code == 0
+    assert "--enforce-16-bit" in result.output
+    assert "otherwise-compatible WAV/AIFF" in result.output
+
+
 def test_scan_device_library_plus_returns_nonzero(tmp_path):
     database = tmp_path / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db"
     database.parent.mkdir(parents=True)
@@ -60,3 +68,32 @@ def test_cleanup_originals_cli_runs_verified_plan(tmp_path, monkeypatch):
     assert result.exit_code == 0
     assert "Removed 1 verified originals" in result.output
     assert "2.00 GiB" in result.output
+
+
+def test_restore_local_backup_cli_uses_selected_usb(tmp_path, monkeypatch):
+    session = tmp_path / "RekordboxBackup-session"
+    usb = tmp_path / "USB"
+    session.mkdir()
+    usb.mkdir()
+    calls = []
+
+    class FakeEngine:
+        def restore_local_backup(self, session_dir, usb_root):
+            calls.append((session_dir, usb_root))
+            return True, "Local backup restored"
+
+    monkeypatch.setattr(main, "ConversionEngine", FakeEngine)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "restore-local-backup",
+            str(session),
+            "--usb",
+            str(usb),
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0
+    assert calls == [(session.resolve(), usb.resolve())]
+    assert "Local backup restored" in result.output

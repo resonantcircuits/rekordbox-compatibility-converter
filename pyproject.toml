@@ -12,7 +12,6 @@ authors = [
 dependencies = [
     "click>=8.1.0",
     "rich>=13.0.0",
-    "mutagen>=1.47.0",
     "customtkinter>=6.0.0",
     "darkdetect>=0.8.0",
 ]

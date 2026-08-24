@@ -68,6 +68,10 @@ def test_convert_flac_to_aiff(sample_flac: Path, tmp_path: Path):
     assert info.get("sample_rate") == 44100
     assert "aiff" in info.get("format_name", "").lower()
 
+    assert converter.decoded_audio_sha256(target_aiff) == converter.decoded_audio_sha256(
+        sample_flac
+    )
+
 
 def test_converted_output_fsync_uses_writable_descriptor(
     sample_flac: Path, tmp_path: Path, monkeypatch

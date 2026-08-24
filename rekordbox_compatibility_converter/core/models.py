@@ -100,6 +100,8 @@ class ConversionTask:
     anlz_2ex_path: Optional[Path] = None
     source_size_at_scan: Optional[int] = None
     source_mtime_ns_at_scan: Optional[int] = None
+    existing_target_track_id: Optional[int] = None
+    reuse_existing_target: bool = False
     status: str = "pending"
     new_file_size: int = 0
     output_probe: Dict = field(default_factory=dict)
@@ -152,5 +154,7 @@ class ScanSummary:
     free_space_bytes: int = 0
     estimated_extra_bytes: int = 0
     required_space_bytes: int = 0
+    required_space_with_local_backup_bytes: int = 0
+    local_backup_required_space_bytes: int = 0
     unsupported_reason: Optional[str] = None
     pdb_sha256: str = ""

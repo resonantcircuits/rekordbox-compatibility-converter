@@ -3,6 +3,7 @@
 import subprocess
 import hashlib
 import inspect
+import json
 import os
 import struct
 from pathlib import Path
@@ -11,11 +12,13 @@ from rekordbox_compatibility_converter.core.engine import (
     DEFAULT_CONVERSION_THREADS,
     ConversionEngine,
 )
+from rekordbox_compatibility_converter.core.local_backup import LocalBackupSession
 from rekordbox_compatibility_converter.core.anlz_manager import ANLZManager
 from rekordbox_compatibility_converter.core.models import (
     CompatibilityProfileType,
     REKORDBOX_FILE_TYPE_BY_TARGET,
     TargetFormat,
+    TrackInfo,
 )
 from rekordbox_compatibility_converter.core.pdb_manager import (
     DATABASE_SEQUENCE_OFFSET,
@@ -78,6 +81,59 @@ def test_default_conversion_threads_are_usb_safe():
 
     assert DEFAULT_CONVERSION_THREADS == 2
     assert default == DEFAULT_CONVERSION_THREADS
+
+
+def test_scan_enforces_16_bit_across_otherwise_compatible_lossless_audio(
+    mock_usb: Path
+):
+    contents = mock_usb / "Contents"
+    (contents / "song.flac").unlink()
+    source = contents / "song.aiff"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.5",
+            "-ar", "44100", "-c:a", "pcm_s24be", str(source),
+        ],
+        check=True,
+    )
+    pdb = create_minimal_pdb(
+        mock_usb / "PIONEER" / "rekordbox",
+        file_size=source.stat().st_size,
+        filename="song.aiff",
+        filepath="/Contents/song.aiff",
+        analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+        file_type=0x0C,
+    )
+    data = bytearray(pdb.read_bytes())
+    struct.pack_into("<H", data, 4096 + 0x28 + 0x52, 24)
+    pdb.write_bytes(data)
+    engine = ConversionEngine()
+
+    profile_default = engine.scan(mock_usb)
+    enforced = engine.scan(mock_usb, enforce_pcm_16_bit=True)
+
+    assert profile_default.tasks == []
+    assert len(enforced.tasks) == 1
+    assert enforced.tasks[0].source_abs_path == source
+    assert enforced.tasks[0].target_abs_path == source
+    assert enforced.tasks[0].target_sample_depth == 16
+
+    result = engine.execute(
+        enforced,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=mock_usb.parent / "Local Backups",
+    )
+
+    assert result["success"] is True
+    assert engine.audio_converter.probe(source)["bits_per_sample"] == 16
+    restored, message = engine.restore_local_backup(
+        Path(result["local_backup_session"]), mock_usb
+    )
+    assert restored is True, message
+    assert engine.audio_converter.probe(source)["bits_per_sample"] == 24
 
 
 def test_engine_scan_and_execute_parallel(mock_usb: Path):
@@ -370,6 +426,424 @@ def test_experimental_onelibrary_bridge_retains_originals_and_database(mock_usb:
     assert PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb").tracks[
         0
     ].file_path.endswith(".aiff")
+
+
+def test_onelibrary_bridge_archives_originals_locally_and_reclaims_usb_space(
+    mock_usb: Path, tmp_path: Path
+):
+    dlp = mock_usb / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db"
+    dlp.parent.mkdir(parents=True)
+    original_dlp = b"encrypted OneLibrary database"
+    dlp.write_bytes(original_dlp)
+    backup_base = tmp_path / "Local Backups"
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb, allow_onelibrary_bridge=True)
+
+    assert summary.required_space_with_local_backup_bytes < summary.required_space_bytes
+    assert summary.local_backup_required_space_bytes > 0
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        allow_onelibrary_bridge=True,
+        local_original_backup_dir=backup_base,
+    )
+
+    assert result["success"] is True
+    assert result["onelibrary_sync_required"] is True
+    assert not (mock_usb / "Contents" / "song.flac").exists()
+    assert (mock_usb / "Contents" / "song.aiff").is_file()
+    assert dlp.read_bytes() == original_dlp
+    assert not (mock_usb / "PIONEER" / "rekordbox" / "export.pdb.bak").exists()
+    session = Path(result["local_backup_session"])
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "complete"
+    assert manifest["originals"][0]["status"] == "converted"
+    assert (session / manifest["originals"][0]["archive_path"]).is_file()
+    assert any(item["usb_path"].endswith("export.pdb") for item in manifest["metadata"])
+
+
+def test_local_archive_conversion_failure_restores_usb_original(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+    monkeypatch.setattr(
+        engine.audio_converter,
+        "convert",
+        lambda **_kwargs: (False, 0, "simulated conversion failure"),
+    )
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+
+    assert result["success"] is False
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+    manifest = json.loads(
+        (Path(result["local_backup_session"]) / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert manifest["status"] == "complete_with_errors"
+    assert manifest["originals"][0]["status"] == "restored_after_failure"
+
+
+def test_local_archive_requires_confirmation_before_replacing_existing_target(
+    mock_usb: Path, tmp_path: Path
+):
+    existing_target = mock_usb / "Contents" / "song.aiff"
+    old_target = b"pre-existing unreferenced target"
+    existing_target.write_bytes(old_target)
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+
+    assert result["success"] is False
+    assert "explicit reuse or replacement" in result["preflight_errors"][0]
+    assert existing_target.read_bytes() == old_target
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+
+
+def test_local_archive_replaces_and_can_restore_preexisting_target(
+    mock_usb: Path, tmp_path: Path
+):
+    existing_target = mock_usb / "Contents" / "song.aiff"
+    old_target = b"pre-existing unreferenced target"
+    existing_target.write_bytes(old_target)
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+        replace_existing_targets=True,
+    )
+
+    assert result["success"] is True
+    assert existing_target.read_bytes() != old_target
+    session = Path(result["local_backup_session"])
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert len(manifest["preexisting_targets"]) == 1
+    archived_target = session / manifest["preexisting_targets"][0]["archive_path"]
+    assert archived_target.read_bytes() == old_target
+
+    restored, message = engine.restore_local_backup(session, mock_usb)
+
+    assert restored is True, message
+    assert existing_target.read_bytes() == old_target
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+
+
+def test_local_archive_conversion_failure_restores_preexisting_target(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    existing_target = mock_usb / "Contents" / "song.aiff"
+    old_target = b"pre-existing unreferenced target"
+    existing_target.write_bytes(old_target)
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+    monkeypatch.setattr(
+        engine.audio_converter,
+        "convert",
+        lambda **_kwargs: (False, 0, "simulated conversion failure"),
+    )
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+        replace_existing_targets=True,
+    )
+
+    assert result["success"] is False
+    assert existing_target.read_bytes() == old_target
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+
+
+def test_local_archive_audio_verifies_and_reuses_referenced_target(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    source = mock_usb / "Contents" / "song.flac"
+    target = mock_usb / "Contents" / "song.aiff"
+    success, _size, error = engine.audio_converter.convert(source, target)
+    assert success is True, error
+    target_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    summary = engine.scan(mock_usb)
+
+    pdb_manager = PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb")
+    pdb_manager.tracks.append(
+        TrackInfo(
+            id=202,
+            filename="song.aiff",
+            file_path="/Contents/song.aiff",
+            file_type=REKORDBOX_FILE_TYPE_BY_TARGET[TargetFormat.AIFF],
+        )
+    )
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.engine.PDBManager",
+        lambda _path: pdb_manager,
+    )
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+        replace_existing_targets=True,
+    )
+
+    assert result["success"] is True
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == target_digest
+    session = Path(result["local_backup_session"])
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["preexisting_targets"] == []
+    assert manifest["originals"][0]["converted_target_preexisting"] is True
+
+    restored, message = engine.restore_local_backup(session, mock_usb)
+
+    assert restored is True, message
+    assert source.is_file()
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == target_digest
+
+
+def test_local_archive_failure_does_not_modify_usb(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+
+    def fail_copy(*_args, **_kwargs):
+        raise OSError("simulated local disk failure")
+
+    monkeypatch.setattr(LocalBackupSession, "_copy_verified", fail_copy)
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+
+    assert result["success"] is False
+    assert "verified local original backup" in result["error"]
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+
+
+def test_local_archive_folder_cannot_be_inside_usb(mock_usb: Path):
+    result = ConversionEngine().execute(
+        ConversionEngine().scan(mock_usb),
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        local_original_backup_dir=mock_usb / "Backups",
+    )
+
+    assert result["success"] is False
+    assert "cannot be located on the selected USB" in result["error"]
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Backups").exists()
+
+
+def test_restore_local_archive_recovers_audio_database_and_waveforms(
+    mock_usb: Path, tmp_path: Path
+):
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb),
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+    session = Path(result["local_backup_session"])
+
+    restored, message = engine.restore_local_backup(session, mock_usb)
+
+    assert restored is True, message
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+    assert PDBManager(
+        mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    ).tracks[0].file_path == "/Contents/song.flac"
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    for suffix in (".DAT", ".EXT", ".2EX"):
+        assert ANLZManager.read_path(anlz_dir / f"ANLZ0000{suffix}") == (
+            "/Contents/song.flac"
+        )
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "restored"
+
+
+def test_restore_local_archive_refuses_changed_converted_file(
+    mock_usb: Path, tmp_path: Path
+):
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb),
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+    converted = mock_usb / "Contents" / "song.aiff"
+    converted.write_bytes(converted.read_bytes() + b"changed")
+
+    restored, message = engine.restore_local_backup(
+        Path(result["local_backup_session"]), mock_usb
+    )
+
+    assert restored is False
+    assert "changed after this backup" in message
+    assert converted.is_file()
+    assert not (mock_usb / "Contents" / "song.flac").exists()
+
+
+def test_local_archive_allows_usb_space_below_legacy_staging_requirement(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+    backup_base = tmp_path / "Local Backups"
+    backup_base.mkdir()
+    reduced_required = summary.required_space_with_local_backup_bytes
+    assert reduced_required < summary.required_space_bytes
+    simulated_usb_free = reduced_required
+
+    def disk_usage(path):
+        resolved = Path(path).resolve()
+        free = 10 * 1024 ** 3 if resolved == backup_base.resolve() else simulated_usb_free
+        return type("DiskUsage", (), {"free": free})()
+
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.engine.shutil.disk_usage",
+        disk_usage,
+    )
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=backup_base,
+    )
+
+    assert result["success"] is True
+    assert (mock_usb / "Contents" / "song.aiff").is_file()
+    assert not (mock_usb / "Contents" / "song.flac").exists()
+
+
+def test_local_archive_refuses_insufficient_computer_space_without_usb_changes(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    backup_base = tmp_path / "Local Backups"
+    backup_base.mkdir()
+
+    def disk_usage(path):
+        free = 1 if Path(path).resolve() == backup_base.resolve() else 10 * 1024 ** 3
+        return type("DiskUsage", (), {"free": free})()
+
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.engine.shutil.disk_usage",
+        disk_usage,
+    )
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb),
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        local_original_backup_dir=backup_base,
+    )
+
+    assert result["success"] is False
+    assert "Insufficient local backup space" in result["error"]
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+
+
+def test_local_archive_refuses_source_changed_after_copy(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    original_archive = LocalBackupSession.archive
+
+    def archive_then_change(session, tasks, metadata_paths):
+        task_list = list(tasks)
+        original_archive(session, task_list, metadata_paths)
+        source = task_list[0].source_abs_path
+        source.write_bytes(source.read_bytes() + b"changed after archive")
+
+    monkeypatch.setattr(LocalBackupSession, "archive", archive_then_change)
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb),
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+
+    assert result["success"] is False
+    assert "changed after archiving" in result["error"]
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+
+
+def test_restore_local_archive_rejects_manifest_path_traversal(
+    mock_usb: Path, tmp_path: Path
+):
+    session = tmp_path / "malicious-session"
+    session.mkdir()
+    (session / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "usb_root": str(mock_usb),
+                "originals": [
+                    {
+                        "usb_path": "../outside.flac",
+                        "archive_path": "../outside.flac",
+                    }
+                ],
+                "metadata": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored, message = ConversionEngine().restore_local_backup(session, mock_usb)
+
+    assert restored is False
+    assert "Unsafe usb_path" in message
 
 
 def _complete_onelibrary_bridge(mock_usb: Path):

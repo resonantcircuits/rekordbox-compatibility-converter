@@ -82,6 +82,15 @@ def cli(ctx):
     help="Target conversion format (default: aiff).",
 )
 @click.option(
+    "--enforce-16-bit",
+    is_flag=True,
+    default=False,
+    help=(
+        "Convert every lossless track above 16-bit, including otherwise-compatible WAV/AIFF, "
+        "and make all lossless conversion output 16-bit."
+    ),
+)
+@click.option(
     "--experimental-onelibrary-bridge",
     is_flag=True,
     help="Scan Device Library even when OneLibrary is present; OneLibrary is not modified.",
@@ -90,6 +99,7 @@ def scan(
     path: Optional[str],
     profile: str,
     target_format: str,
+    enforce_16_bit: bool,
     experimental_onelibrary_bridge: bool,
 ):
     """Scans a Rekordbox USB drive and reports compatibility status."""
@@ -101,7 +111,9 @@ def scan(
         Panel(
             f"[bold cyan]Scanning Rekordbox Drive:[/bold cyan] {escape(str(usb_root))}\n"
             f"[bold cyan]Target Profile:[/bold cyan] {escape(hw_profile.name)}\n"
-            f"[bold cyan]Default Target Format:[/bold cyan] {target_format.upper()}",
+            f"[bold cyan]Default Target Format:[/bold cyan] {target_format.upper()}\n"
+            f"[bold cyan]Lossless Bit Depth:[/bold cyan] "
+            f"{'Enforce 16-bit across USB' if enforce_16_bit else 'Profile default'}",
             title="Rekordbox Compatibility Scan",
             expand=False,
         )
@@ -112,6 +124,7 @@ def scan(
             usb_root=usb_root,
             profile=hw_profile,
             forced_target_format=TargetFormat(target_format.lower()),
+            enforce_pcm_16_bit=enforce_16_bit,
             allow_onelibrary_bridge=experimental_onelibrary_bridge,
         )
 
@@ -179,9 +192,10 @@ def scan(
         console.print(f"[dim]... and {len(summary.tasks) - 10} more tracks.[/dim]\n")
 
     bridge_flag = " --experimental-onelibrary-bridge" if summary.onelibrary_bridge_mode else ""
+    depth_flag = " --enforce-16-bit" if enforce_16_bit else ""
     console.print(
         f"[yellow]To convert these tracks, run:[/yellow] "
-        f"[bold cyan]rbconvert convert {escape(str(usb_root))} --profile {profile}{bridge_flag}[/bold cyan]\n"
+        f"[bold cyan]rbconvert convert {escape(str(usb_root))} --profile {profile}{depth_flag}{bridge_flag}[/bold cyan]\n"
     )
 
 
@@ -201,6 +215,15 @@ def scan(
     type=click.Choice(["aiff", "wav", "mp3"], case_sensitive=False),
     default="aiff",
     help="Target conversion format (default: aiff).",
+)
+@click.option(
+    "--enforce-16-bit",
+    is_flag=True,
+    default=False,
+    help=(
+        "Convert every lossless track above 16-bit, including otherwise-compatible WAV/AIFF, "
+        "and make all lossless conversion output 16-bit."
+    ),
 )
 @click.option(
     "--threads",
@@ -223,6 +246,23 @@ def scan(
     help="Do not delete original audio files after successful conversion (requires extra disk space).",
 )
 @click.option(
+    "--original-backup-dir",
+    type=click.Path(path_type=Path, file_okay=False, resolve_path=True),
+    help=(
+        "Archive and verify original audio in this local folder before removing it from the USB. "
+        "Required for the space-saving OneLibrary bridge workflow."
+    ),
+)
+@click.option(
+    "--replace-existing-targets",
+    is_flag=True,
+    default=False,
+    help=(
+        "Resolve existing conversion targets: audio-verify and reuse referenced targets, and "
+        "archive and replace unreferenced targets. Requires --original-backup-dir."
+    ),
+)
+@click.option(
     "--no-backup",
     is_flag=True,
     default=False,
@@ -243,17 +283,20 @@ def scan(
     "--experimental-onelibrary-bridge",
     is_flag=True,
     help=(
-        "Patch Device Library while retaining originals and backups, then rebuild OneLibrary "
-        "from Device Library in Rekordbox."
+        "Archive originals locally, patch Device Library, then rebuild OneLibrary from Device "
+        "Library in Rekordbox."
     ),
 )
 def convert(
     path: Optional[str],
     profile: str,
     target_format: str,
+    enforce_16_bit: bool,
     threads: int,
     yes: bool,
     keep_originals: bool,
+    original_backup_dir: Optional[Path],
+    replace_existing_targets: bool,
     no_backup: bool,
     clean_dotfiles: bool,
     eject: bool,
@@ -275,6 +318,7 @@ def convert(
         usb_root=usb_root,
         profile=hw_profile,
         forced_target_format=TargetFormat(target_format.lower()),
+        enforce_pcm_16_bit=enforce_16_bit,
         allow_onelibrary_bridge=experimental_onelibrary_bridge,
     )
 
@@ -291,8 +335,50 @@ def convert(
             raise click.ClickException(
                 "--no-backup cannot be used with --experimental-onelibrary-bridge."
             )
-        keep_originals = True
+        if not original_backup_dir:
+            raise click.ClickException(
+                "--original-backup-dir is required with --experimental-onelibrary-bridge."
+            )
+        if keep_originals:
+            raise click.ClickException(
+                "--keep-originals cannot be combined with --original-backup-dir."
+            )
+        keep_originals = False
         no_backup = False
+    elif original_backup_dir and keep_originals:
+        raise click.ClickException(
+            "--keep-originals cannot be combined with --original-backup-dir."
+        )
+
+    existing_targets = [
+        task
+        for task in summary.tasks
+        if task.target_abs_path.is_file()
+        and engine._path_key(task.target_abs_path)
+        != engine._path_key(task.source_abs_path)
+    ]
+    if replace_existing_targets and not original_backup_dir:
+        raise click.ClickException(
+            "--replace-existing-targets requires --original-backup-dir."
+        )
+    if existing_targets and not original_backup_dir:
+        raise click.ClickException(
+            f"Found {len(existing_targets)} existing conversion target(s). Provide "
+            "--original-backup-dir so they can be archived before replacement."
+        )
+    if existing_targets and not replace_existing_targets:
+        if yes:
+            raise click.ClickException(
+                f"Found {len(existing_targets)} existing conversion target(s). Explicitly pass "
+                "--replace-existing-targets to archive and regenerate them."
+            )
+        replace_existing_targets = click.confirm(
+            f"Safely resolve {len(existing_targets)} existing target file(s)?",
+            default=False,
+        )
+        if not replace_existing_targets:
+            console.print("[yellow]Conversion canceled by user.[/yellow]")
+            return
 
     if summary.incompatible_tracks == 0:
         console.print("\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n")
@@ -304,8 +390,11 @@ def convert(
             f"[bold]Target Profile:[/bold] {escape(hw_profile.name)}\n"
             f"[bold]Tracks to Convert:[/bold] [bold red]{len(summary.tasks)}[/bold red]\n"
             f"[bold]Target Audio Format:[/bold] [bold green]{target_format.upper()}[/bold green]\n"
+            f"[bold]Lossless Bit Depth:[/bold] {'Enforce 16-bit across USB' if enforce_16_bit else 'Profile default'}\n"
             f"[bold]Parallel Workers:[/bold] {threads} threads\n"
-            f"[bold]Delete Originals After Durable Commit:[/bold] {'Yes' if not keep_originals else 'No (Keep originals)'}\n"
+            f"[bold]Local Original Archive:[/bold] {escape(str(original_backup_dir)) if original_backup_dir else 'Disabled'}\n"
+            f"[bold]Original Handling:[/bold] "
+            f"{'Verify locally, then remove before conversion' if original_backup_dir else 'Delete after durable commit' if not keep_originals else 'Keep originals on USB'}\n"
             f"[bold]Clean macOS Ghost Files (._*):[/bold] {'Yes' if clean_dotfiles else 'No'}\n"
             f"[bold]Create Database Backups:[/bold] {'Yes (.bak)' if not no_backup else 'No'}",
             title=(
@@ -320,8 +409,8 @@ def convert(
     if summary.onelibrary_bridge_mode:
         console.print(
             Panel(
-                "This will patch only Device Library. Original audio and database backups are "
-                "required and will be retained. Afterward, Rekordbox must overwrite OneLibrary "
+                "This will patch only Device Library. Original audio will first be copied and "
+                "verified in the selected local archive, then removed from the USB. Afterward, Rekordbox must overwrite OneLibrary "
                 "using OneLibrary > Convert from Device Library. OneLibrary-only playlists or "
                 "histories may be lost. Test only on a fully copied USB.",
                 border_style="yellow",
@@ -363,12 +452,16 @@ def convert(
             clean_dotfiles=clean_dotfiles,
             progress_callback=on_progress,
             allow_onelibrary_bridge=summary.onelibrary_bridge_mode,
+            local_original_backup_dir=original_backup_dir,
+            replace_existing_targets=replace_existing_targets,
         )
 
     if result.get("success"):
         cleaned_msg = f"\n• Cleaned {result.get('cleaned_dotfiles', 0)} macOS ghost files." if clean_dotfiles else ""
         original_msg = (
-            "• Original removal was attempted only after each durable database commit."
+            f"• Original audio is preserved in {escape(str(result.get('local_backup_session')))}."
+            if result.get("local_backup_session")
+            else "• Original removal was attempted only after each durable database commit."
             if not keep_originals
             else "• Original audio files were retained."
         )
@@ -418,6 +511,33 @@ def convert(
 
     if not result.get("success"):
         raise click.exceptions.Exit(1)
+
+
+@cli.command("restore-local-backup")
+@click.argument(
+    "session",
+    type=click.Path(path_type=Path, exists=True, file_okay=False, resolve_path=True),
+)
+@click.option(
+    "--usb",
+    "usb_path",
+    type=click.Path(path_type=Path, exists=True, file_okay=False, resolve_path=True),
+    help="Current USB mount path. Defaults to the path recorded in the backup manifest.",
+)
+@click.option("--yes", "confirmed", is_flag=True, help="Confirm restoration without prompting.")
+def restore_local_backup(session: Path, usb_path: Optional[Path], confirmed: bool):
+    """Restores audio and all Rekordbox metadata from a verified local session."""
+    if not confirmed and not click.confirm(
+        "Restore original audio and Rekordbox databases from this local archive? "
+        "Verified converted replacements will be removed.",
+        default=False,
+    ):
+        console.print("[yellow]Restore canceled.[/yellow]")
+        return
+    success, message = ConversionEngine().restore_local_backup(session, usb_path)
+    if not success:
+        raise click.ClickException(message)
+    console.print(f"[bold green]{escape(message)}[/bold green]")
 
 
 @cli.command()

@@ -57,3 +57,5 @@ def test_scan_summary():
     assert summary.has_export_pdb is False
     assert summary.onelibrary_bridge_mode is False
     assert summary.required_space_bytes == 0
+    assert summary.required_space_with_local_backup_bytes == 0
+    assert summary.local_backup_required_space_bytes == 0

@@ -13,7 +13,7 @@ This tool points directly at an exported Rekordbox USB drive and:
 2. Synchronizes Pioneer's proprietary binary database (**`PIONEER/rekordbox/export.pdb`** - DeviceSQL format).
 3. Synchronizes Pioneer's binary analysis files (**`PIONEER/USBANLZ/.../ANLZxxxx.DAT`, `.EXT` & `.2EX`** - PMAI/PPTH tags) so waveforms, beatgrids, and hot cues load instantly without re-analysis.
 4. Cleans macOS hidden AppleDouble (`._*`) and `.DS_Store` ghost files that cause CDJs to freeze or report read errors.
-5. Provides space-saving in-place conversion (deleting original FLAC files after successful conversion and DB commit).
+5. Provides space-saving conversion by hash-verifying originals in a user-selected local recovery archive before removing them from the USB; the final converted library must still fit.
 
 ---
 
@@ -27,8 +27,7 @@ This tool points directly at an exported Rekordbox USB drive and:
 - **External Dependencies**:
   - `click` & `rich` (CLI)
   - `customtkinter` & `darkdetect` (Modern GUI)
-  - `mutagen` (Audio metadata)
-  - `ffmpeg` & `ffprobe` (System binaries for audio transcoding)
+  - `ffmpeg` & `ffprobe` (System tools for source installs; minimal LGPL builds are bundled in desktop releases)
 
 ---
 
@@ -43,6 +42,7 @@ rekordbox_compatibility_converter/
 │   ├── anlz_manager.py     # Binary PMAI / PPTH ANLZ parser and header synchronizer
 │   ├── dlp_manager.py      # DeviceLibraryPlus (exportLibrary.db) manager
 │   ├── audio_converter.py  # Multi-format FFmpeg converter with TPDF dithering
+│   ├── local_backup.py     # Verified off-USB original/metadata archive and guarded restore
 │   ├── usb_detector.py     # Cross-platform USB mount point detector
 │   ├── validator.py        # End-to-end database, audio, and ANLZ integrity checker
 │   └── engine.py           # Multi-threaded orchestrator, backup/restore, dotfile cleaner
