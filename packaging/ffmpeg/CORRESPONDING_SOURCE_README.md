@@ -6,8 +6,9 @@ archives and build script used to create them.
 
 Run `build_minimal_ffmpeg.sh OUTPUT_DIRECTORY` in a POSIX shell with a C
 toolchain, `make`, `pkg-config`, `curl`, `tar`, and zlib development files.
-On Windows, use the MINGW64 environment supplied by MSYS2. See the project's
-GitHub Actions workflow for the exact CI environment.
+Optimized x86 and x86-64 builds also require NASM. On Windows, use the MINGW64
+environment supplied by MSYS2. See the project's GitHub Actions workflow for
+the exact CI environment.
 
 FFmpeg is built without `--enable-gpl` and without `--enable-nonfree`. The
 resulting FFmpeg build is licensed under LGPL 2.1 or later. LAME is licensed

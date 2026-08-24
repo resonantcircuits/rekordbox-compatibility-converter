@@ -98,6 +98,15 @@ jobs:
       - name: Install dependencies & PyInstaller
         run: uv sync --frozen --extra dev --python 3.11
 
+      - name: Install NASM (macOS Intel)
+        if: matrix.asset_suffix == 'macOS-x86_64'
+        run: |
+          if brew tap | grep -Fxq aws/tap
+          then
+            brew untap aws/tap
+          fi
+          brew install nasm
+
       - name: Set up MSYS2 build tools
         if: matrix.platform == 'windows'
         uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884 # v2
@@ -107,6 +116,7 @@ jobs:
           install: >-
             make
             mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-nasm
             mingw-w64-x86_64-pkgconf
             mingw-w64-x86_64-zlib
 
