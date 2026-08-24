@@ -82,7 +82,11 @@ class ConversionEngine:
             for path in {
                 sidecar
                 for task in summary.tasks
-                for sidecar in (task.anlz_dat_path, task.anlz_ext_path)
+                for sidecar in (
+                    task.anlz_dat_path,
+                    task.anlz_ext_path,
+                    task.anlz_2ex_path,
+                )
                 if sidecar and sidecar.is_file()
             }
         )
@@ -243,6 +247,7 @@ class ConversionEngine:
 
                 anlz_dat = None
                 anlz_ext = None
+                anlz_2ex = None
                 if track.analyze_path:
                     anlz_rel = track.analyze_path.lstrip("/")
                     anlz_dat_candidate = usb_root / anlz_rel
@@ -250,6 +255,9 @@ class ConversionEngine:
                     anlz_ext_candidate = anlz_dat_candidate.with_suffix(".EXT")
                     if anlz_ext_candidate.exists():
                         anlz_ext = anlz_ext_candidate
+                    anlz_2ex_candidate = anlz_dat_candidate.with_suffix(".2EX")
+                    if anlz_2ex_candidate.exists():
+                        anlz_2ex = anlz_2ex_candidate
 
                 source_size_at_scan = None
                 source_mtime_ns_at_scan = None
@@ -274,6 +282,7 @@ class ConversionEngine:
                     target_sample_depth=target_sd,
                     anlz_dat_path=anlz_dat,
                     anlz_ext_path=anlz_ext,
+                    anlz_2ex_path=anlz_2ex,
                     source_size_at_scan=source_size_at_scan,
                     source_mtime_ns_at_scan=source_mtime_ns_at_scan,
                 )
@@ -455,9 +464,21 @@ class ConversionEngine:
                     )
                     continue
                 anlz_ext = anlz_dat.with_suffix(".EXT")
-                if anlz_ext.is_file() and ANLZManager.read_path(anlz_ext) != replacement_track.file_path:
+                if (
+                    anlz_ext.is_file()
+                    and ANLZManager.read_path(anlz_ext) != replacement_track.file_path
+                ):
                     plan.errors.append(
                         f"{problem_prefix}: ANLZ .EXT still references the old audio path."
+                    )
+                    continue
+                anlz_2ex = anlz_dat.with_suffix(".2EX")
+                if (
+                    anlz_2ex.is_file()
+                    and ANLZManager.read_path(anlz_2ex) != replacement_track.file_path
+                ):
+                    plan.errors.append(
+                        f"{problem_prefix}: ANLZ .2EX still references the old audio path."
                     )
                     continue
 
@@ -660,7 +681,11 @@ class ConversionEngine:
                 dat_path = usb_root / track.analyze_path.lstrip("/")
                 if not self._is_within(usb_root, dat_path):
                     return False, f"Backup contains an unsafe ANLZ path: {track.analyze_path}"
-                for sidecar in (dat_path, dat_path.with_suffix(".EXT")):
+                for sidecar in (
+                    dat_path,
+                    dat_path.with_suffix(".EXT"),
+                    dat_path.with_suffix(".2EX"),
+                ):
                     expected_path = seen_sidecars.get(sidecar)
                     if sidecar in seen_sidecars and expected_path != track.file_path:
                         return False, f"Backup assigns conflicting tracks to ANLZ file {sidecar}."
@@ -823,9 +848,17 @@ class ConversionEngine:
                 task.error = f"Unsafe source path escapes the USB root: {task.track.file_path}"
             elif not self._is_within(summary.usb_root, target):
                 task.error = f"Unsafe target path escapes the USB root: {task.target_usb_path}"
-            elif task.anlz_dat_path and not self._is_within(summary.usb_root, task.anlz_dat_path):
+            elif task.anlz_dat_path and not self._is_within(
+                summary.usb_root, task.anlz_dat_path
+            ):
                 task.error = f"Unsafe ANLZ path escapes the USB root: {task.track.analyze_path}"
-            elif task.anlz_ext_path and not self._is_within(summary.usb_root, task.anlz_ext_path):
+            elif task.anlz_ext_path and not self._is_within(
+                summary.usb_root, task.anlz_ext_path
+            ):
+                task.error = f"Unsafe ANLZ path escapes the USB root: {task.track.analyze_path}"
+            elif task.anlz_2ex_path and not self._is_within(
+                summary.usb_root, task.anlz_2ex_path
+            ):
                 task.error = f"Unsafe ANLZ path escapes the USB root: {task.track.analyze_path}"
             elif not source.is_file():
                 task.error = f"Source file not found or not a regular file: {source}"
@@ -895,7 +928,19 @@ class ConversionEngine:
                 and task.anlz_ext_path
                 and ANLZManager.read_path(task.anlz_ext_path) != task.track.file_path
             ):
-                task.error = f"ANLZ .EXT does not reference this track's current path: {task.anlz_ext_path}"
+                task.error = (
+                    "ANLZ .EXT does not reference this track's current path: "
+                    f"{task.anlz_ext_path}"
+                )
+            elif (
+                task.track.file_path != task.target_usb_path
+                and task.anlz_2ex_path
+                and ANLZManager.read_path(task.anlz_2ex_path) != task.track.file_path
+            ):
+                task.error = (
+                    "ANLZ .2EX does not reference this track's current path: "
+                    f"{task.anlz_2ex_path}"
+                )
 
             target_owners[target_key] = task
             if task.error:
@@ -943,7 +988,11 @@ class ConversionEngine:
                 for task in summary.tasks:
                     if task.track.file_path == task.target_usb_path:
                         continue
-                    for anlz_path in (task.anlz_dat_path, task.anlz_ext_path):
+                    for anlz_path in (
+                        task.anlz_dat_path,
+                        task.anlz_ext_path,
+                        task.anlz_2ex_path,
+                    ):
                         if anlz_path and anlz_path not in backed_up_paths:
                             self._backup_file(anlz_path)
                             backed_up_paths.add(anlz_path)
@@ -1016,7 +1065,11 @@ class ConversionEngine:
                 if not same_path and target.exists():
                     raise RuntimeError(f"Target appeared during conversion; refusing to overwrite: {target}")
                 if track_snapshot["file_path"] != task.target_usb_path:
-                    for anlz_path in (task.anlz_dat_path, task.anlz_ext_path):
+                    for anlz_path in (
+                        task.anlz_dat_path,
+                        task.anlz_ext_path,
+                        task.anlz_2ex_path,
+                    ):
                         if anlz_path and ANLZManager.read_path(anlz_path) != track_snapshot["file_path"]:
                             raise RuntimeError(
                                 f"ANLZ file changed while conversion was running: {anlz_path}"
@@ -1060,7 +1113,11 @@ class ConversionEngine:
                 database_committed = True
 
                 if track_snapshot["file_path"] != task.target_usb_path:
-                    for anlz_path in (task.anlz_dat_path, task.anlz_ext_path):
+                    for anlz_path in (
+                        task.anlz_dat_path,
+                        task.anlz_ext_path,
+                        task.anlz_2ex_path,
+                    ):
                         if not anlz_path:
                             continue
                         if not anlz_path.is_file():

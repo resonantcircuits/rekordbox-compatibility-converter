@@ -281,21 +281,9 @@ class ExportValidator:
                             )
                         )
 
-                    anlz_ext_abs = anlz_dat_abs.with_suffix(".EXT")
-                    if anlz_ext_abs.exists() and not self._is_within(usb_root, anlz_ext_abs):
-                        report.all_anlz_valid = False
-                        track_has_issue = True
-                        report.issues.append(
-                            ValidationIssue(
-                                track.id,
-                                track.title or track.filename,
-                                "ERROR",
-                                f"Unsafe ANLZ .EXT path escapes the USB root: {anlz_ext_abs}",
-                            )
-                        )
-                    elif anlz_ext_abs.is_file():
-                        ext_path_str = ANLZManager.read_path(anlz_ext_abs)
-                        if ext_path_str is None:
+                    for suffix in (".EXT", ".2EX"):
+                        sidecar = anlz_dat_abs.with_suffix(suffix)
+                        if sidecar.exists() and not self._is_within(usb_root, sidecar):
                             report.all_anlz_valid = False
                             track_has_issue = True
                             report.issues.append(
@@ -303,20 +291,35 @@ class ExportValidator:
                                     track.id,
                                     track.title or track.filename,
                                     "ERROR",
-                                    f"ANLZ .EXT has no valid PPTH path: {anlz_ext_abs.relative_to(usb_root)}",
+                                    f"Unsafe ANLZ {suffix} path escapes the USB root: {sidecar}",
                                 )
                             )
-                        elif ext_path_str != track.file_path:
-                            report.all_anlz_valid = False
-                            track_has_issue = True
-                            report.issues.append(
-                                ValidationIssue(
-                                    track.id,
-                                    track.title or track.filename,
-                                    "ERROR",
-                                    f"ANLZ .EXT PPTH mismatch: ANLZ has '{ext_path_str}', DB has '{track.file_path}'",
+                        elif sidecar.is_file():
+                            sidecar_path = ANLZManager.read_path(sidecar)
+                            if sidecar_path is None:
+                                report.all_anlz_valid = False
+                                track_has_issue = True
+                                report.issues.append(
+                                    ValidationIssue(
+                                        track.id,
+                                        track.title or track.filename,
+                                        "ERROR",
+                                        f"ANLZ {suffix} has no valid PPTH path: "
+                                        f"{sidecar.relative_to(usb_root)}",
+                                    )
                                 )
-                            )
+                            elif sidecar_path != track.file_path:
+                                report.all_anlz_valid = False
+                                track_has_issue = True
+                                report.issues.append(
+                                    ValidationIssue(
+                                        track.id,
+                                        track.title or track.filename,
+                                        "ERROR",
+                                        f"ANLZ {suffix} PPTH mismatch: ANLZ has "
+                                        f"'{sidecar_path}', DB has '{track.file_path}'",
+                                    )
+                                )
 
             if track_has_issue:
                 report.failed_tracks += 1

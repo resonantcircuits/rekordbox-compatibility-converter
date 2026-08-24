@@ -11,7 +11,7 @@ When DJs export tracks to a USB drive from Rekordbox, many club-standard CDJs (e
 This tool points directly at an exported Rekordbox USB drive and:
 1. Converts audio files in parallel via FFmpeg to **AIFF** (default, bit-identical PCM timing ensuring **zero beatgrid drift**), WAV, or MP3.
 2. Synchronizes Pioneer's proprietary binary database (**`PIONEER/rekordbox/export.pdb`** - DeviceSQL format).
-3. Synchronizes Pioneer's binary analysis files (**`PIONEER/USBANLZ/.../ANLZxxxx.DAT` & `.EXT`** - PMAI/PPTH tags) so waveforms, beatgrids, and hot cues load instantly without re-analysis.
+3. Synchronizes Pioneer's binary analysis files (**`PIONEER/USBANLZ/.../ANLZxxxx.DAT`, `.EXT` & `.2EX`** - PMAI/PPTH tags) so waveforms, beatgrids, and hot cues load instantly without re-analysis.
 4. Cleans macOS hidden AppleDouble (`._*`) and `.DS_Store` ghost files that cause CDJs to freeze or report read errors.
 5. Provides space-saving in-place conversion (deleting original FLAC files after successful conversion and DB commit).
 
@@ -78,10 +78,12 @@ rekordbox_compatibility_converter/
     - Index `20`: `file_path` (e.g. `/Contents/Artist/Album/Song.aiff`)
 - **In-Place Patching Strategy**: Replacing `.flac` with `.aiff` uses identical 5-character string lengths (`.flac` = 5 bytes, `.aiff` = 5 bytes), allowing zero-offset-shift in-place byte patching.
 
-### `ANLZ` Files (`.DAT` and `.EXT`)
+### `ANLZ` Files (`.DAT`, `.EXT`, and `.2EX`)
 - **Format**: Big-endian tagged binary structure starting with magic header `PMAI` (28 bytes).
 - **Section Tag `PPTH`**: Contains the relative file path encoded in **UTF-16BE**.
+- **Waveform generations**: `.DAT` stores legacy waveform data, `.EXT` stores RGB waveform data, and `.2EX` stores newer 3-band waveform data. Existing sidecars must remain path-consistent as a set.
 - **Header Sync**: If path length changes, both the `PPTH` section length and `len_file` at offset `0x08` in the `PMAI` header must be recalculated. Offset `0x04` stores `len_header`.
+- **No PPTH alignment padding**: The PPTH body is exactly the NUL-terminated UTF-16BE path. Do not insert four-byte alignment padding before the following tag.
 
 ---
 

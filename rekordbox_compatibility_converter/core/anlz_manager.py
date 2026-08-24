@@ -1,4 +1,4 @@
-"""ANLZ parser and patcher for Rekordbox analysis files (.DAT / .EXT)."""
+"""ANLZ parser and patcher for Rekordbox analysis files (.DAT / .EXT / .2EX)."""
 
 import os
 import shutil
@@ -91,12 +91,11 @@ class ANLZManager:
                 except UnicodeEncodeError:
                     return False
                 new_len_path = len(encoded_path)
-                new_tag_len = 12 + 4 + new_len_path
-
-                # Align to 4-byte boundary if needed
-                pad_bytes = (4 - (new_tag_len % 4)) % 4
-                encoded_path += b"\x00" * pad_bytes
-                new_tag_len += pad_bytes
+                # The PPTH body is exactly the UTF-16BE path, including its
+                # terminating NUL. Real Rekordbox files do not align this tag
+                # to a four-byte boundary; adding padding shifts every
+                # following waveform tag and can make hardware reject it.
+                new_tag_len = 16 + new_len_path
 
                 # Construct new PPTH section
                 new_ppth = struct.pack(">4sIII", b"PPTH", hdr_len, new_tag_len, new_len_path) + encoded_path

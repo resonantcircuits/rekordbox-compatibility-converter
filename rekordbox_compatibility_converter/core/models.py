@@ -97,6 +97,7 @@ class ConversionTask:
     target_sample_depth: int
     anlz_dat_path: Optional[Path] = None
     anlz_ext_path: Optional[Path] = None
+    anlz_2ex_path: Optional[Path] = None
     source_size_at_scan: Optional[int] = None
     source_mtime_ns_at_scan: Optional[int] = None
     status: str = "pending"

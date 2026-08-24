@@ -63,8 +63,12 @@ def mock_usb(tmp_path: Path) -> Path:
         analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
     )
 
-    # Create ANLZ
-    create_minimal_anlz(anlz_dir, "/Contents/song.flac")
+    # Create all waveform generations exported by current Rekordbox versions.
+    anlz_dat = create_minimal_anlz(anlz_dir, "/Contents/song.flac")
+    anlz_ext = anlz_dat.with_suffix(".EXT")
+    anlz_2ex = anlz_dat.with_suffix(".2EX")
+    anlz_ext.write_bytes(anlz_dat.read_bytes())
+    anlz_2ex.write_bytes(anlz_dat.read_bytes())
 
     return usb_dir
 
@@ -109,8 +113,12 @@ def test_engine_scan_and_execute_parallel(mock_usb: Path):
     result = engine.execute(summary=summary, delete_original=True, backup=True, threads=2, clean_dotfiles=True)
     assert result.get("success") is True
     assert result.get("completed") == 1
-    assert result.get("anlz_updated") == 1
+    assert result.get("anlz_updated") == 3
     assert result.get("cleaned_dotfiles") >= 1
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    assert (anlz_dir / "ANLZ0000.DAT.bak").is_file()
+    assert (anlz_dir / "ANLZ0000.EXT.bak").is_file()
+    assert (anlz_dir / "ANLZ0000.2EX.bak").is_file()
 
     # Verify converted AIFF exists
     aiff_path = mock_usb / "Contents" / "song.aiff"
@@ -126,6 +134,12 @@ def test_engine_scan_and_execute_parallel(mock_usb: Path):
 
     assert ANLZManager.read_path(
         mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001" / "ANLZ0000.DAT"
+    ) == "/Contents/song.aiff"
+    assert ANLZManager.read_path(
+        mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001" / "ANLZ0000.EXT"
+    ) == "/Contents/song.aiff"
+    assert ANLZManager.read_path(
+        mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001" / "ANLZ0000.2EX"
     ) == "/Contents/song.aiff"
 
     validation = ExportValidator().validate(mock_usb, profile)
@@ -207,6 +221,58 @@ def test_engine_rolls_back_database_when_anlz_update_fails(mock_usb: Path, monke
     ).tracks[0]
     assert restored_track.file_path.endswith(".flac")
     assert restored_track.file_type == 0x05
+
+
+def test_engine_rolls_back_dat_and_ext_when_2ex_update_fails(
+    mock_usb: Path, monkeypatch
+):
+    original_update = ANLZManager.update_path
+
+    def fail_2ex(path: Path, *args, **kwargs):
+        if path.suffix == ".2EX":
+            return False
+        return original_update(path, *args, **kwargs)
+
+    monkeypatch.setattr(ANLZManager, "update_path", staticmethod(fail_2ex))
+    engine = ConversionEngine()
+
+    result = engine.execute(
+        engine.scan(mock_usb), backup=False, clean_dotfiles=False, threads=1
+    )
+
+    assert result["success"] is False
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
+    assert PDBManager(
+        mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    ).tracks[0].file_path == "/Contents/song.flac"
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    for suffix in (".DAT", ".EXT", ".2EX"):
+        assert ANLZManager.read_path(anlz_dir / f"ANLZ0000{suffix}") == (
+            "/Contents/song.flac"
+        )
+
+
+def test_engine_preflight_rejects_stale_2ex_path(
+    mock_usb: Path, tmp_path: Path
+):
+    stale = create_minimal_anlz(tmp_path, "/Contents/stale.flac").read_bytes()
+    anlz_2ex = (
+        mock_usb
+        / "PIONEER"
+        / "USBANLZ"
+        / "P001"
+        / "00000001"
+        / "ANLZ0000.2EX"
+    )
+    anlz_2ex.write_bytes(stale)
+    engine = ConversionEngine()
+
+    result = engine.execute(engine.scan(mock_usb), clean_dotfiles=False)
+
+    assert result["success"] is False
+    assert any("ANLZ .2EX" in error for error in result["preflight_errors"])
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
 
 
 def test_progress_callback_failure_does_not_interrupt_commit(mock_usb: Path):
@@ -457,6 +523,29 @@ def test_cleanup_refuses_stale_device_sql_file_type(mock_usb: Path):
     assert source.is_file()
 
 
+def test_cleanup_refuses_stale_2ex_path(mock_usb: Path):
+    engine, dlp = _complete_onelibrary_bridge(mock_usb)
+    source = mock_usb / "Contents" / "song.flac"
+    anlz_2ex = (
+        mock_usb
+        / "PIONEER"
+        / "USBANLZ"
+        / "P001"
+        / "00000001"
+        / "ANLZ0000.2EX"
+    )
+    anlz_2ex.write_bytes(anlz_2ex.with_suffix(".2EX.bak").read_bytes())
+    _mark_onelibrary_rebuilt(mock_usb, dlp)
+
+    plan = engine.plan_retained_original_cleanup(mock_usb)
+    result = engine.cleanup_retained_originals(plan)
+
+    assert any("ANLZ .2EX still references" in error for error in plan.errors)
+    assert result["success"] is False
+    assert result["removed"] == 0
+    assert source.is_file()
+
+
 def test_scan_uses_short_aif_extension_when_aiff_does_not_fit(tmp_path: Path):
     usb = tmp_path / "USB"
     contents = usb / "Contents"
@@ -532,6 +621,11 @@ def test_restore_succeeds_when_originals_were_retained(mock_usb: Path):
 
     assert restored is True, message
     assert PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb").tracks[0].file_path.endswith(".flac")
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    for suffix in (".DAT", ".EXT", ".2EX"):
+        assert ANLZManager.read_path(anlz_dir / f"ANLZ0000{suffix}") == (
+            "/Contents/song.flac"
+        )
 
 
 def test_restore_ignores_unrelated_stale_anlz_backup(mock_usb: Path, tmp_path: Path):

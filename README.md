@@ -5,7 +5,7 @@
 
 A cross-platform CLI and desktop GUI for checking an exported Rekordbox USB and converting incompatible audio to CDJ/XDJ-compatible AIFF, WAV, or MP3.
 
-The converter updates the DeviceSQL `PIONEER/rekordbox/export.pdb` database—including its audio-format code—and referenced `ANLZxxxx.DAT`/`.EXT` analysis paths. It stages output under unique temporary names, refuses target collisions and unsafe paths, commits each database update durably, and only then removes the original audio when requested.
+The converter updates the DeviceSQL `PIONEER/rekordbox/export.pdb` database—including its audio-format code—and referenced `ANLZxxxx.DAT`/`.EXT`/`.2EX` analysis paths. It stages output under unique temporary names, refuses target collisions and unsafe paths, commits each database update durably, and only then removes the original audio when requested.
 
 ## Why it exists
 
@@ -19,7 +19,7 @@ Manual conversion breaks the paths stored in Rekordbox's exported database and a
 - Produces 16/24-bit AIFF or WAV, or 320 kbps MP3.
 - Distinguishes AAC from ALAC inside ambiguous `.m4a` containers with `ffprobe`.
 - Updates `export.pdb` filenames, paths, sizes, sample rates, bit depths, and bitrates.
-- Updates PPTH paths in referenced ANLZ `.DAT` and `.EXT` files.
+- Updates PPTH paths in referenced ANLZ `.DAT`, `.EXT`, and `.2EX` files.
 - Verifies that audio is decodable and that its extension, DeviceSQL format code, sample rate, bit depth, and size agree with database metadata.
 - Detects missing, malformed, or mismatched ANLZ paths.
 - Rejects DeviceSQL databases whose header sequence is inconsistent with their pages.

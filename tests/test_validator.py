@@ -7,6 +7,7 @@ from rekordbox_compatibility_converter.core.pdb_manager import (
     TRACK_FILE_TYPE_OFFSET,
 )
 from rekordbox_compatibility_converter.core.validator import ExportValidator
+from tests.test_anlz import create_minimal_anlz
 from tests.test_engine import mock_usb
 from tests.test_pdb import create_minimal_pdb
 
@@ -85,3 +86,14 @@ def test_validator_rejects_anlz_path_outside_usb(tmp_path: Path):
     report = ExportValidator().validate(usb)
 
     assert any("Unsafe ANLZ path" in issue.message for issue in report.issues)
+
+
+def test_validator_rejects_stale_2ex_path(mock_usb: Path, tmp_path: Path):
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    stale = create_minimal_anlz(tmp_path, "/Contents/stale.flac").read_bytes()
+    (anlz_dir / "ANLZ0000.2EX").write_bytes(stale)
+
+    report = ExportValidator().validate(mock_usb)
+
+    assert report.failed_tracks == 1
+    assert any(".2EX PPTH mismatch" in issue.message for issue in report.issues)
