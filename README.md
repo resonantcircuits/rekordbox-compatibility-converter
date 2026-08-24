@@ -19,15 +19,16 @@ Releases are available for Apple Silicon Macs, Intel Macs, and 64-bit Windows. F
 2. Connect the Rekordbox USB and select it in the app.
 3. Choose the hardware profile and scan the library.
 4. Review the affected tracks, choose a local recovery folder, and start conversion.
-5. Verify the USB in Rekordbox and on the equipment you intend to use.
+5. If the USB uses OneLibrary, follow the prompt to run **Convert from Device Library** in Rekordbox.
+6. Verify the USB in Rekordbox and on the equipment you intend to use.
 
-The app updates the traditional Device Library (`export.pdb`) and its referenced waveform, beatgrid, and cue analysis files. If the USB also contains OneLibrary, the app explains the required two-step Rekordbox workflow before making changes.
+The app updates the traditional Device Library (`export.pdb`) and its referenced waveform, beatgrid, and cue analysis files. USBs for newer OneLibrary devices are supported through a two-step workflow: after conversion, Rekordbox's **Convert from Device Library** command rebuilds OneLibrary from the updated Device Library. The app guides you through this extra step; it does not modify `exportLibrary.db` directly.
 
 ## What it handles
 
 - FLAC, ALAC, high-sample-rate audio, and optional 16-bit normalization
 - AIFF, WAV, or 320 kbps MP3 output
-- Device Library paths and audio metadata
+- Device Library paths and audio metadata, with a Rekordbox handoff for OneLibrary
 - Legacy, RGB, and 3-band waveform sidecars (`.DAT`, `.EXT`, and `.2EX`)
 - Verified local recovery archives for originals and Rekordbox metadata
 - Existing-target checks, path containment, available-space checks, and rollback

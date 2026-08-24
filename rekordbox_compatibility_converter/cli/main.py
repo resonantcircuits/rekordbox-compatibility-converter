@@ -164,8 +164,37 @@ def scan(
     console.print(f"\n[bold]Total Tracks:[/bold] {summary.total_tracks}")
     console.print(f"[bold green]Compatible Tracks:[/bold green] {summary.compatible_tracks}")
 
-    if summary.incompatible_tracks == 0:
+    if summary.analysis_repairs:
+        console.print(
+            f"[bold yellow]Waveform Paths to Repair:[/bold yellow] "
+            f"{len(summary.analysis_repairs)}"
+        )
+        repair_table = Table(
+            title="Tracks Requiring Waveform Path Repair",
+            show_header=True,
+            header_style="bold yellow",
+        )
+        repair_table.add_column("ID", justify="right", style="dim")
+        repair_table.add_column("Title", style="bold")
+        repair_table.add_column("Stored Audio Path", style="dim")
+        repair_table.add_column("Current Audio Path", style="green")
+        for repair in summary.analysis_repairs[:10]:
+            repair_table.add_row(
+                str(repair.track.id),
+                repair.track.title or repair.track.filename,
+                repair.old_audio_path,
+                repair.new_audio_path,
+            )
+        console.print(repair_table)
+
+    if summary.incompatible_tracks == 0 and not summary.analysis_repairs:
         console.print("\n[bold green]All tracks are compatible with the selected profile.[/bold green]\n")
+        return
+
+    if summary.incompatible_tracks == 0:
+        console.print(
+            "\n[green]All audio formats are compatible, but stored waveform paths need repair.[/green]\n"
+        )
         return
 
     console.print(f"[bold red]Incompatible Tracks:[/bold red] {summary.incompatible_tracks}")
@@ -380,7 +409,7 @@ def convert(
             console.print("[yellow]Conversion canceled by user.[/yellow]")
             return
 
-    if summary.incompatible_tracks == 0:
+    if summary.incompatible_tracks == 0 and not summary.analysis_repairs:
         console.print("\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n")
         return
 
@@ -389,6 +418,7 @@ def convert(
             f"[bold]Target Drive:[/bold] {escape(str(usb_root))}\n"
             f"[bold]Target Profile:[/bold] {escape(hw_profile.name)}\n"
             f"[bold]Tracks to Convert:[/bold] [bold red]{len(summary.tasks)}[/bold red]\n"
+            f"[bold]Waveform Paths to Repair:[/bold] [bold yellow]{len(summary.analysis_repairs)}[/bold yellow]\n"
             f"[bold]Target Audio Format:[/bold] [bold green]{target_format.upper()}[/bold green]\n"
             f"[bold]Lossless Bit Depth:[/bold] {'Enforce 16-bit across USB' if enforce_16_bit else 'Profile default'}\n"
             f"[bold]Parallel Workers:[/bold] {threads} threads\n"
@@ -436,13 +466,25 @@ def convert(
         TimeRemainingColumn(),
         console=console,
     ) as progress:
-        bar = progress.add_task("[cyan]Converting tracks in parallel...", total=len(summary.tasks))
+        bar = progress.add_task(
+            "[cyan]Processing planned tracks...",
+            total=len(summary.tasks) + len(summary.analysis_repairs),
+        )
 
         def on_progress(task, current, total):
             short_name = escape(task.track.filename)
             if len(short_name) > 30:
                 short_name = short_name[:27] + "..."
             progress.update(bar, advance=1, description=f"[cyan]Finished ({current}/{total}): [bold]{short_name}[/bold]")
+
+        def on_phase(phase, current, total, detail):
+            if phase == "waveform_repair":
+                progress.update(
+                    bar,
+                    total=max(1, total),
+                    completed=current,
+                    description=f"[cyan]Repairing waveform paths: [bold]{escape(detail)}[/bold]",
+                )
 
         result = engine.execute(
             summary=summary,
@@ -451,15 +493,29 @@ def convert(
             threads=threads,
             clean_dotfiles=clean_dotfiles,
             progress_callback=on_progress,
+            phase_callback=on_phase,
             allow_onelibrary_bridge=summary.onelibrary_bridge_mode,
             local_original_backup_dir=original_backup_dir,
             replace_existing_targets=replace_existing_targets,
         )
 
     if result.get("success"):
+        adopted = result.get("adopted_existing_targets", 0)
+        converted = result["completed"] - adopted
+        adopted_msg = (
+            f"\n• Relinked {adopted} stale database row(s) to strictly verified existing files."
+            if adopted
+            else ""
+        )
+        repaired = result.get("analysis_paths_repaired", 0)
+        repaired_msg = (
+            f"\n• Repaired stale waveform paths for {repaired} track(s)."
+            if repaired
+            else ""
+        )
         cleaned_msg = f"\n• Cleaned {result.get('cleaned_dotfiles', 0)} macOS ghost files." if clean_dotfiles else ""
         original_msg = (
-            f"• Original audio is preserved in {escape(str(result.get('local_backup_session')))}."
+            f"• Available originals and metadata are preserved in {escape(str(result.get('local_backup_session')))}."
             if result.get("local_backup_session")
             else "• Original removal was attempted only after each durable database commit."
             if not keep_originals
@@ -469,7 +525,8 @@ def convert(
         warning_msg = f"\n• Warning: {escape(result_warnings[0])}" if result_warnings else ""
         console.print(
             Panel(
-                f"[bold green]Successfully converted {result['completed']} tracks.[/bold green]\n"
+                f"[bold green]Successfully converted {converted} tracks.[/bold green]"
+                f"{adopted_msg}{repaired_msg}\n"
                 f"• Database [cyan]export.pdb[/cyan] successfully patched and synced.\n"
                 f"• Updated {result.get('anlz_updated', 0)} analysis path files ([cyan]ANLZ[/cyan]).{cleaned_msg}\n"
                 f"{original_msg}{warning_msg}",

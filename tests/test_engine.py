@@ -646,6 +646,242 @@ def test_local_archive_audio_verifies_and_reuses_referenced_target(
     assert hashlib.sha256(target.read_bytes()).hexdigest() == target_digest
 
 
+def test_missing_original_adopts_strictly_matching_referenced_target(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    source = mock_usb / "Contents" / "song.flac"
+    target = mock_usb / "Contents" / "song.mp3"
+    success, _size, error = engine.audio_converter.convert(
+        source,
+        target,
+        target_format=TargetFormat.MP3,
+        sample_rate=44100,
+        sample_depth=16,
+    )
+    assert success is True, error
+    target_digest = hashlib.sha256(target.read_bytes()).hexdigest()
+    summary = engine.scan(mock_usb, forced_target_format=TargetFormat.MP3)
+    task = summary.tasks[0]
+    task.track.duration = round(engine.audio_converter.probe(target)["duration"])
+    pdb_manager = PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb")
+    pdb_manager.tracks.append(
+        TrackInfo(
+            id=202,
+            title=task.track.title,
+            filename=task.target_filename,
+            file_path=task.target_usb_path,
+            analyze_path=task.track.analyze_path,
+            sample_rate=task.target_sample_rate,
+            sample_depth=task.target_sample_depth,
+            bitrate=320000,
+            file_size=target.stat().st_size,
+            file_type=REKORDBOX_FILE_TYPE_BY_TARGET[TargetFormat.MP3],
+            duration=task.track.duration,
+        )
+    )
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.engine.PDBManager",
+        lambda _path: pdb_manager,
+    )
+    source.unlink()
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+        replace_existing_targets=True,
+    )
+
+    assert result["success"] is True, result.get("preflight_errors")
+    assert result["completed"] == 1
+    assert result["adopted_existing_targets"] == 1
+    assert task.adopt_existing_target is True
+    assert hashlib.sha256(target.read_bytes()).hexdigest() == target_digest
+    assert task.track.file_path == "/Contents/song.mp3"
+    assert PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb").tracks[
+        0
+    ].file_path == "/Contents/song.mp3"
+    assert ANLZManager.read_path(task.anlz_dat_path) == "/Contents/song.mp3"
+    session = Path(result["local_backup_session"])
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["originals"] == []
+
+
+def test_missing_original_refuses_mismatched_referenced_target(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    source = mock_usb / "Contents" / "song.flac"
+    target = mock_usb / "Contents" / "song.mp3"
+    success, _size, error = engine.audio_converter.convert(
+        source,
+        target,
+        target_format=TargetFormat.MP3,
+    )
+    assert success is True, error
+    summary = engine.scan(mock_usb, forced_target_format=TargetFormat.MP3)
+    task = summary.tasks[0]
+    pdb_manager = PDBManager(mock_usb / "PIONEER" / "rekordbox" / "export.pdb")
+    pdb_manager.tracks.append(
+        TrackInfo(
+            id=202,
+            title="Different track",
+            filename=task.target_filename,
+            file_path=task.target_usb_path,
+            analyze_path=task.track.analyze_path,
+            sample_rate=task.target_sample_rate,
+            sample_depth=task.target_sample_depth,
+            file_size=target.stat().st_size,
+            file_type=REKORDBOX_FILE_TYPE_BY_TARGET[TargetFormat.MP3],
+            duration=task.track.duration,
+        )
+    )
+    monkeypatch.setattr(
+        "rekordbox_compatibility_converter.core.engine.PDBManager",
+        lambda _path: pdb_manager,
+    )
+    source.unlink()
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        local_original_backup_dir=tmp_path / "Local Backups",
+        replace_existing_targets=True,
+    )
+
+    assert result["success"] is False
+    assert "track title differs" in result["preflight_errors"][0]
+    assert pdb_manager.tracks[0].file_path == "/Contents/song.flac"
+    assert target.is_file()
+
+
+def test_compatible_track_repairs_extension_only_stale_waveform_paths(
+    mock_usb: Path, tmp_path: Path
+):
+    engine = ConversionEngine()
+    flac = mock_usb / "Contents" / "song.flac"
+    mp3 = mock_usb / "Contents" / "song.mp3"
+    success, _size, error = engine.audio_converter.convert(
+        flac, mp3, target_format=TargetFormat.MP3
+    )
+    assert success is True, error
+    flac.unlink()
+    create_minimal_pdb(
+        mock_usb / "PIONEER" / "rekordbox",
+        file_size=mp3.stat().st_size,
+        filename="song.mp3",
+        filepath="/Contents/song.mp3",
+        analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+        file_type=0x01,
+    )
+
+    summary = engine.scan(mock_usb)
+
+    assert summary.tasks == []
+    assert len(summary.analysis_repairs) == 1
+    repair = summary.analysis_repairs[0]
+    assert repair.old_audio_path == "/Contents/song.flac"
+    assert repair.new_audio_path == "/Contents/song.mp3"
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+
+    assert result["success"] is True, result
+    assert result["completed"] == 0
+    assert result["analysis_paths_repaired"] == 1
+    assert mp3.is_file()
+    assert all(
+        ANLZManager.read_path(sidecar) == "/Contents/song.mp3"
+        for sidecar in repair.sidecar_paths
+    )
+    session = Path(result["local_backup_session"])
+    manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["originals"] == []
+    assert len(manifest["metadata"]) >= 4
+
+
+def test_stale_waveform_path_with_different_stem_is_not_auto_repaired(mock_usb: Path):
+    engine = ConversionEngine()
+    flac = mock_usb / "Contents" / "song.flac"
+    mp3 = mock_usb / "Contents" / "different.mp3"
+    success, _size, error = engine.audio_converter.convert(
+        flac, mp3, target_format=TargetFormat.MP3
+    )
+    assert success is True, error
+    flac.unlink()
+    create_minimal_pdb(
+        mock_usb / "PIONEER" / "rekordbox",
+        file_size=mp3.stat().st_size,
+        filename="different.mp3",
+        filepath="/Contents/different.mp3",
+        analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+        file_type=0x01,
+    )
+
+    summary = engine.scan(mock_usb)
+
+    assert summary.tasks == []
+    assert summary.analysis_repairs == []
+
+
+def test_waveform_path_repair_rolls_back_every_sidecar_on_failure(
+    mock_usb: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    flac = mock_usb / "Contents" / "song.flac"
+    mp3 = mock_usb / "Contents" / "song.mp3"
+    success, _size, error = engine.audio_converter.convert(
+        flac, mp3, target_format=TargetFormat.MP3
+    )
+    assert success is True, error
+    flac.unlink()
+    create_minimal_pdb(
+        mock_usb / "PIONEER" / "rekordbox",
+        file_size=mp3.stat().st_size,
+        filename="song.mp3",
+        filepath="/Contents/song.mp3",
+        analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+        file_type=0x01,
+    )
+    summary = engine.scan(mock_usb)
+    repair = summary.analysis_repairs[0]
+    original_bytes = {path: path.read_bytes() for path in repair.sidecar_paths}
+    original_update_path = ANLZManager.update_path
+    calls = 0
+
+    def fail_second_update(path, new_path, backup=True):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            return False
+        return original_update_path(path, new_path, backup=backup)
+
+    monkeypatch.setattr(ANLZManager, "update_path", fail_second_update)
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=False,
+        clean_dotfiles=False,
+    )
+
+    assert result["success"] is False
+    assert result["analysis_paths_repaired"] == 0
+    assert result["failed"] == 1
+    assert all(path.read_bytes() == data for path, data in original_bytes.items())
+
+
 def test_local_archive_failure_does_not_modify_usb(
     mock_usb: Path, tmp_path: Path, monkeypatch
 ):

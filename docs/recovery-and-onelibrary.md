@@ -14,7 +14,9 @@ When a local recovery folder is selected, the converter creates a self-contained
 
 The manifest records the converted-file and metadata hashes. Restoration stops if unrelated changes make the USB inconsistent with the recorded post-conversion state.
 
-Files already referenced by Rekordbox are never overwritten blindly. The converter stages a new output and reuses the referenced target only when their decoded-audio SHA-256 hashes match. Unreferenced targets require separate replacement confirmation and are added to rollback and full restoration.
+Files already referenced by Rekordbox are never overwritten blindly. When the original is available, the converter stages a new output and reuses the referenced target only when their decoded-audio SHA-256 hashes match. If Rekordbox reintroduces a database row for an original it did not restore, the converter can relink that row to an existing converted file only when the title, duration, filename, DeviceSQL path, analysis path, file size, codec, sample rate, and bit depth all agree. The existing audio is not modified. Unreferenced targets require separate replacement confirmation and are added to rollback and full restoration.
+
+The scan also detects compatible tracks whose Device Library path already points to converted audio while all existing `.DAT`, `.EXT`, and `.2EX` files still contain the missing original's extension-only path. These waveform paths can be repaired without reconverting or modifying the audio. Different directories, filename stems, mixed sidecar paths, existing original files, or malformed sidecars are refused.
 
 Storing originals on the computer removes the old requirement to fit every original and every converted file on the USB at the same time. The final converted library still has to fit; AIFF can be substantially larger than FLAC.
 

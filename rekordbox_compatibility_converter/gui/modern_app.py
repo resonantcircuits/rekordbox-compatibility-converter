@@ -1128,15 +1128,35 @@ class ModernRekordboxGUI(ctk.CTk):
                 values=(t.id, t.title or t.filename, t.extension.upper(), spec, target_spec),
                 tags=("odd" if i % 2 else "even",),
             )
+        for offset, repair in enumerate(self.summary.analysis_repairs, start=len(self.summary.tasks)):
+            t = repair.track
+            spec = f"{t.sample_rate / 1000:g} kHz / {t.sample_depth}-bit"
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    t.id,
+                    t.title or t.filename,
+                    t.extension.upper(),
+                    spec,
+                    "Repair waveform path",
+                ),
+                tags=("odd" if offset % 2 else "even",),
+            )
 
         total = self.summary.total_tracks
         incompat = self.summary.incompatible_tracks
         compat = self.summary.compatible_tracks
+        repairs = len(self.summary.analysis_repairs)
+        planned = incompat + repairs
 
         self.card_total.val_label.configure(text=str(total))
         self.card_compat.val_label.configure(text=str(compat))
         self.card_incompat.val_label.configure(text=str(incompat))
-        self.lbl_track_count.configure(text=f"{incompat} of {total} tracks")
+        count_text = f"{incompat} conversions"
+        if repairs:
+            count_text += f", {repairs} waveform repairs"
+        self.lbl_track_count.configure(text=f"{count_text} of {total} tracks")
 
         if self.summary.onelibrary_bridge_mode:
             self.del_switch.select()
@@ -1146,7 +1166,7 @@ class ModernRekordboxGUI(ctk.CTk):
             self.btn_convert.configure(text="Convert Tracks (Step 1 of 2)")
             self.lbl_status.configure(
                 text=(
-                    f"Step 1 of 2 ready: {incompat} tracks need conversion. "
+                    f"Step 1 of 2 ready: {incompat} conversions and {repairs} waveform repairs. "
                     "You will finish Step 2 in Rekordbox."
                 )
             )
@@ -1156,8 +1176,7 @@ class ModernRekordboxGUI(ctk.CTk):
             self.btn_convert.configure(text="Convert Planned Tracks")
             self.lbl_status.configure(
                 text=(
-                    f"Scan complete: {incompat} tracks require conversion to "
-                    f"{self.format_var.get().upper()}."
+                    f"Scan complete: {incompat} conversions and {repairs} waveform repairs planned."
                 )
             )
 
@@ -1170,7 +1189,7 @@ class ModernRekordboxGUI(ctk.CTk):
             else self.summary.required_space_bytes
         )
         insufficient_space = (
-            incompat > 0
+            planned > 0
             and required_usb_space > self.summary.free_space_bytes
         )
         if insufficient_space:
@@ -1198,7 +1217,7 @@ class ModernRekordboxGUI(ctk.CTk):
                 "2. Alternatively, re-export the library to a larger USB.\n"
                 "3. Scan the USB again.",
             )
-        elif incompat > 0:
+        elif planned > 0:
             self.btn_convert.configure(state="normal")
             if use_local_backup:
                 local_mib = (
@@ -1242,13 +1261,16 @@ class ModernRekordboxGUI(ctk.CTk):
         self.update_idletasks()
 
     def _start_conversion(self):
-        if not self.summary or not self.summary.tasks:
+        if not self.summary or not (
+            self.summary.tasks or self.summary.analysis_repairs
+        ):
             return
 
-        tools_ok, tools_message = self.engine.audio_converter.check_tools()
-        if not tools_ok:
-            messagebox.showerror("FFmpeg Not Found", tools_message)
-            return
+        if self.summary.tasks:
+            tools_ok, tools_message = self.engine.audio_converter.check_tools()
+            if not tools_ok:
+                messagebox.showerror("FFmpeg Not Found", tools_message)
+                return
 
         threads = int(self.threads_slider.get())
         conversion_summary = self.summary
@@ -1273,6 +1295,12 @@ class ModernRekordboxGUI(ctk.CTk):
             return
         create_backup = True if bridge_mode else self.backup_switch.get() == 1
         clean_dotfiles = self.dotfiles_switch.get() == 1
+        conversion_count = len(self.summary.tasks)
+        repair_count = len(self.summary.analysis_repairs)
+        work_description = (
+            f"{conversion_count} track(s) will be converted and {repair_count} stale "
+            "waveform path(s) will be repaired"
+        )
         if bridge_mode:
             bridge_detail = (
                 ONELIBRARY_BRIDGE_CONFIRM_MESSAGE
@@ -1284,16 +1312,14 @@ class ModernRekordboxGUI(ctk.CTk):
             )
             confirm = messagebox.askyesno(
                 "Start Step 1 of 2",
-                f"{len(self.summary.tasks)} tracks will be converted to "
-                f"{self.format_var.get().upper()} using {threads} threads.\n\n"
+                f"{work_description}. Conversions use {threads} threads.\n\n"
                 f"{bridge_detail}",
                 default=messagebox.NO,
             )
         else:
             confirm = messagebox.askyesno(
                 "Confirm Conversion",
-                f"Convert {len(self.summary.tasks)} tracks in parallel ({threads} threads) to "
-                f"{self.format_var.get().upper()}?\n\n"
+                f"{work_description}. Conversions use {threads} threads.\n\n"
                 "export.pdb and ANLZ waveforms will be synchronized automatically.",
             )
         if not confirm:
@@ -1318,12 +1344,24 @@ class ModernRekordboxGUI(ctk.CTk):
             referenced_count = sum(
                 task.existing_target_track_id is not None for task in existing_targets
             )
+            missing_referenced_count = sum(
+                task.existing_target_track_id is not None
+                and not task.source_abs_path.is_file()
+                for task in existing_targets
+            )
+            hash_referenced_count = referenced_count - missing_referenced_count
             unreferenced_count = len(existing_targets) - referenced_count
             handling = []
-            if referenced_count:
+            if hash_referenced_count:
                 handling.append(
-                    f"{referenced_count} Rekordbox-referenced target(s) will be reused only "
+                    f"{hash_referenced_count} Rekordbox-referenced target(s) will be reused only "
                     "after a decoded-audio hash comparison"
+                )
+            if missing_referenced_count:
+                handling.append(
+                    f"{missing_referenced_count} stale database row(s) have missing originals; "
+                    "their referenced converted targets will be adopted only after strict track, "
+                    "analysis-path, file-size, codec, sample-rate, bit-depth, and duration checks"
                 )
             if unreferenced_count:
                 handling.append(
@@ -1334,8 +1372,9 @@ class ModernRekordboxGUI(ctk.CTk):
                 "Resolve Existing Targets?",
                 f"Found {len(existing_targets)} existing target file(s).\n\n"
                 + ".\n".join(handling)
-                + ".\n\nOriginal FLACs and replaced targets remain recoverable from the "
-                "local archive. Proceed?",
+                + ".\n\nAvailable originals and replaced targets remain recoverable from the "
+                "local archive. Missing originals cannot be archived, but their existing "
+                "converted targets will not be modified. Proceed?",
                 default=messagebox.NO,
             )
             if not replace_existing_targets:
@@ -1346,7 +1385,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_restore.configure(state="disabled")
         self.btn_cleanup.configure(state="disabled")
         self._set_conversion_controls(False)
-        self._show_conversion_started(len(conversion_summary.tasks))
+        self._show_conversion_started(conversion_count + repair_count)
 
         def run():
             try:
@@ -1406,6 +1445,7 @@ class ModernRekordboxGUI(ctk.CTk):
             "conversion": "Starting conversion",
             "cleanup": "Cleaning USB",
             "finalizing": "Finalizing recovery archive",
+            "waveform_repair": "Repairing waveform paths",
         }
         label = labels.get(phase, "Preparing conversion")
         if total > 0:
@@ -1435,6 +1475,7 @@ class ModernRekordboxGUI(ctk.CTk):
             "conversion": "Starting conversion",
             "cleanup": "Cleaning USB",
             "finalizing": "Finalizing",
+            "waveform_repair": "Repairing waveforms",
         }
         if total > 0:
             button_progress = f" {min(100, round(current / total * 100))}%"
@@ -1484,6 +1525,16 @@ class ModernRekordboxGUI(ctk.CTk):
         self.progress_bar.set(1.0)
 
         if result.get("success"):
+            adopted = result.get("adopted_existing_targets", 0)
+            converted = result.get("completed", 0) - adopted
+            work_summary = f"Converted {converted} tracks."
+            if adopted:
+                work_summary += (
+                    f"\nRelinked {adopted} stale database rows to verified existing files."
+                )
+            repaired = result.get("analysis_paths_repaired", 0)
+            if repaired:
+                work_summary += f"\nRepaired waveform paths for {repaired} tracks."
             if result.get("onelibrary_sync_required"):
                 self.lbl_status.configure(
                     text="Step 1 of 2 complete. Complete Step 2 in Rekordbox before using this USB."
@@ -1491,7 +1542,7 @@ class ModernRekordboxGUI(ctk.CTk):
                 if self.show_guidance_var.get():
                     messagebox.showwarning(
                         "Step 1 Complete — Finish in Rekordbox",
-                        f"Converted {result['completed']} tracks.\n\n"
+                        f"{work_summary}\n\n"
                         f"Local recovery archive:\n{result.get('local_backup_session')}\n\n"
                         f"{ONELIBRARY_REBUILD_REQUIRED_MESSAGE}",
                     )
@@ -1503,7 +1554,17 @@ class ModernRekordboxGUI(ctk.CTk):
                 self.del_switch.configure(state="normal")
                 self.backup_switch.configure(state="normal")
                 return
-            self.lbl_status.configure(text=f"Conversion complete: {result.get('completed', 0)} tracks converted.")
+            if adopted:
+                self.lbl_status.configure(
+                    text=(
+                        f"Complete: {converted} tracks converted; {adopted} stale database "
+                        "rows relinked to verified existing files."
+                    )
+                )
+            else:
+                self.lbl_status.configure(
+                    text=f"Conversion complete: {converted} tracks converted."
+                )
             cleaned = result.get("cleaned_dotfiles", 0)
             dot_msg = f"\n- Cleaned {cleaned} macOS ghost files" if cleaned else ""
             original_msg = (
@@ -1517,7 +1578,7 @@ class ModernRekordboxGUI(ctk.CTk):
                 show_result = messagebox.showwarning if warnings else messagebox.showinfo
                 show_result(
                     "Conversion Complete with Warnings" if warnings else "Conversion Complete",
-                    f"Successfully converted {result['completed']} tracks.\n\n"
+                    f"{work_summary}\n\n"
                     f"- Rekordbox Device Library paths were updated.\n"
                     f"- Updated {result.get('anlz_updated', 0)} waveform-analysis path files.{dot_msg}\n"
                     f"{original_msg}{warning_msg}",

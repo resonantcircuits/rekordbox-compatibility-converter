@@ -20,6 +20,7 @@ from .dlp_manager import (
 )
 from .local_backup import LocalBackupSession
 from .models import (
+    AnalysisPathRepair,
     ConversionTask,
     OriginalCleanupCandidate,
     OriginalCleanupPlan,
@@ -53,6 +54,100 @@ class ConversionEngine:
     def _path_key(path: Path) -> str:
         """Uses a conservative case-insensitive key suitable for common USB filesystems."""
         return str(path.resolve(strict=False)).casefold()
+
+    @staticmethod
+    def _existing_owner_matches_task(
+        task: ConversionTask, owner: Optional[TrackInfo]
+    ) -> Optional[str]:
+        """Validate that a referenced target is the same logical Rekordbox track."""
+        if owner is None:
+            return "the existing target has no Rekordbox database owner"
+        expected_type = REKORDBOX_FILE_TYPE_BY_TARGET[task.target_format]
+        checks = (
+            (owner.id != task.track.id, "the database owner is the same stale row"),
+            (owner.file_path == task.target_usb_path, "the owner path differs"),
+            (owner.filename == task.target_filename, "the owner filename differs"),
+            (
+                bool(owner.analyze_path)
+                and owner.analyze_path == task.track.analyze_path,
+                "the analysis path differs",
+            ),
+            (owner.title == task.track.title, "the track title differs"),
+            (owner.duration == task.track.duration, "the track duration differs"),
+            (owner.file_type == expected_type, "the target format metadata differs"),
+            (
+                owner.sample_rate == task.target_sample_rate,
+                "the target sample rate metadata differs",
+            ),
+            (
+                owner.sample_depth == task.target_sample_depth,
+                "the target bit depth metadata differs",
+            ),
+        )
+        return next((message for matches, message in checks if not matches), None)
+
+    @staticmethod
+    def _existing_target_probe_error(task: ConversionTask, probe: Dict) -> Optional[str]:
+        if probe.get("probe_error"):
+            return f"the existing target failed audio inspection: {probe['probe_error']}"
+        if int(probe.get("sample_rate") or 0) != task.target_sample_rate:
+            return "the existing target has the wrong sample rate"
+        codec = str(probe.get("codec_name") or "")
+        expected_codec = {
+            TargetFormat.MP3: "mp3",
+            TargetFormat.AIFF: "pcm_s16be" if task.target_sample_depth == 16 else "pcm_s24be",
+            TargetFormat.WAV: "pcm_s16le" if task.target_sample_depth == 16 else "pcm_s24le",
+        }[task.target_format]
+        if codec != expected_codec:
+            return f"the existing target codec is {codec or 'unknown'}, not {expected_codec}"
+        if task.target_format != TargetFormat.MP3 and int(
+            probe.get("bits_per_sample") or 0
+        ) != task.target_sample_depth:
+            return "the existing target has the wrong PCM bit depth"
+        if abs(float(probe.get("duration") or 0) - task.track.duration) > 2:
+            return "the existing target duration differs from the database row"
+        return None
+
+    @classmethod
+    def _plan_analysis_path_repair(
+        cls, usb_root: Path, track: TrackInfo, audio_path: Path
+    ) -> Optional[AnalysisPathRepair]:
+        """Plan an extension-only stale PPTH repair for an existing audio file."""
+        if not track.analyze_path or not audio_path.is_file():
+            return None
+        dat_path = usb_root / track.analyze_path.lstrip("/")
+        if not cls._is_within(usb_root, dat_path) or not dat_path.is_file():
+            return None
+        sidecars = [dat_path]
+        sidecars.extend(
+            candidate
+            for candidate in (dat_path.with_suffix(".EXT"), dat_path.with_suffix(".2EX"))
+            if candidate.is_file() and cls._is_within(usb_root, candidate)
+        )
+        stored_paths = [ANLZManager.read_path(path) for path in sidecars]
+        if any(path is None for path in stored_paths):
+            return None
+        old_paths = {str(path) for path in stored_paths}
+        if old_paths == {track.file_path} or len(old_paths) != 1:
+            return None
+        old_path = next(iter(old_paths))
+        old_posix = PurePosixPath(old_path)
+        new_posix = PurePosixPath(track.file_path)
+        if (
+            old_posix.parent != new_posix.parent
+            or old_posix.stem != new_posix.stem
+            or old_posix.suffix.lower() == new_posix.suffix.lower()
+        ):
+            return None
+        old_absolute = usb_root / old_path.lstrip("/")
+        if not cls._is_within(usb_root, old_absolute) or old_absolute.exists():
+            return None
+        return AnalysisPathRepair(
+            track=track,
+            old_audio_path=old_path,
+            new_audio_path=track.file_path,
+            sidecar_paths=sidecars,
+        )
 
     @staticmethod
     def _estimated_output_size(task: ConversionTask) -> int:
@@ -120,6 +215,12 @@ class ConversionEngine:
                 )
                 if sidecar and sidecar.is_file()
             }
+            | {
+                sidecar
+                for repair in summary.analysis_repairs
+                for sidecar in repair.sidecar_paths
+                if sidecar.is_file()
+            }
         )
         pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
         pdb_bytes = pdb_path.stat().st_size if pdb_path.is_file() else 0
@@ -156,6 +257,12 @@ class ConversionEngine:
             for path in (task.anlz_dat_path, task.anlz_ext_path, task.anlz_2ex_path)
             if path and path.is_file()
         }
+        metadata_paths.update(
+            sidecar.resolve()
+            for repair in summary.analysis_repairs
+            for sidecar in repair.sidecar_paths
+            if sidecar.is_file()
+        )
         pdb_path = summary.usb_root / "PIONEER" / "rekordbox" / "export.pdb"
         if pdb_path.is_file():
             metadata_paths.add(pdb_path.resolve())
@@ -260,6 +367,7 @@ class ConversionEngine:
         pdb_manager = PDBManager(pdb_path)
         summary.pdb_sha256 = hashlib.sha256(pdb_manager.data).hexdigest()
         summary.total_tracks = len(pdb_manager.tracks)
+        repair_analyze_paths = set()
 
         for track in pdb_manager.tracks:
             ext = track.extension.lower()
@@ -297,6 +405,12 @@ class ConversionEngine:
                 )
             if check.is_compatible:
                 summary.compatible_tracks += 1
+                repair = self._plan_analysis_path_repair(
+                    usb_root, track, source_abs
+                )
+                if repair and track.analyze_path not in repair_analyze_paths:
+                    summary.analysis_repairs.append(repair)
+                    repair_analyze_paths.add(track.analyze_path)
             else:
                 summary.incompatible_tracks += 1
 
@@ -900,6 +1014,10 @@ class ConversionEngine:
         replace_existing_targets: bool = False,
     ) -> dict:
         """Execute conversion, optionally archiving originals off the USB first."""
+        total_tasks = len(summary.tasks)
+        total_repairs = len(summary.analysis_repairs)
+        total_work = total_tasks + total_repairs
+
         def report_phase(phase: str, current: int, total: int, detail: str = "") -> None:
             if not phase_callback:
                 return
@@ -927,9 +1045,9 @@ class ConversionEngine:
             return {
                 "success": False,
                 "error": message,
-                "total": len(summary.tasks),
+                "total": total_work,
                 "completed": 0,
-                "failed": len(summary.tasks),
+                "failed": total_work,
             }
 
         if summary.onelibrary_bridge_mode:
@@ -937,9 +1055,9 @@ class ConversionEngine:
                 return {
                     "success": False,
                     "error": "The OneLibrary local-backup workflow must remove archived originals from the USB.",
-                    "total": len(summary.tasks),
+                    "total": total_work,
                     "completed": 0,
-                    "failed": len(summary.tasks),
+                    "failed": total_work,
                 }
             if not local_original_backup_dir and delete_original:
                 return {
@@ -948,25 +1066,25 @@ class ConversionEngine:
                         "The experimental OneLibrary bridge requires retaining all original "
                         "audio files unless a verified local original backup folder is provided."
                     ),
-                    "total": len(summary.tasks),
+                    "total": total_work,
                     "completed": 0,
-                    "failed": len(summary.tasks),
+                    "failed": total_work,
                 }
             if not backup:
                 return {
                     "success": False,
                     "error": "The experimental OneLibrary bridge requires database backups.",
-                    "total": len(summary.tasks),
+                    "total": total_work,
                     "completed": 0,
-                    "failed": len(summary.tasks),
+                    "failed": total_work,
                 }
         elif local_original_backup_dir and not delete_original:
             return {
                 "success": False,
                 "error": "A local original backup can only be used when originals are removed from the USB.",
-                "total": len(summary.tasks),
+                "total": total_work,
                 "completed": 0,
-                "failed": len(summary.tasks),
+                "failed": total_work,
             }
 
         try:
@@ -979,12 +1097,11 @@ class ConversionEngine:
             return {
                 "success": False,
                 "error": "export.pdb changed after the scan. Scan the drive again before converting.",
-                "total": len(summary.tasks),
+                "total": total_work,
                 "completed": 0,
-                "failed": len(summary.tasks),
+                "failed": total_work,
             }
 
-        total_tasks = len(summary.tasks)
         preflight_errors: List[str] = []
         target_owners: Dict[str, ConversionTask] = {}
         use_local_original_backup = local_original_backup_dir is not None
@@ -993,16 +1110,57 @@ class ConversionEngine:
             for track in pdb_manager.tracks
             if track.file_path
         }
+        tracks_by_id = {track.id: track for track in pdb_manager.tracks}
+        adopted_target_stats: Dict[int, Tuple[int, int]] = {}
 
         report_phase("preflight", 0, total_tasks, "Checking conversion plan")
         for task_number, task in enumerate(summary.tasks, start=1):
             task.status = "pending"
             task.error = None
             task.reuse_existing_target = False
+            task.adopt_existing_target = False
             source = task.source_abs_path
             target = task.target_abs_path
             source_key = self._path_key(source)
             target_key = self._path_key(target)
+            referenced_track_id = (
+                database_path_owners.get(target_key)
+                if source_key != target_key and target.is_file()
+                else None
+            )
+            task.existing_target_track_id = referenced_track_id
+
+            adoption_error: Optional[str] = None
+            if not source.is_file() and referenced_track_id is not None:
+                adoption_error = self._existing_owner_matches_task(
+                    task, tracks_by_id.get(referenced_track_id)
+                )
+                owner = tracks_by_id.get(referenced_track_id)
+                if (
+                    adoption_error is None
+                    and owner is not None
+                    and owner.file_size
+                    and target.stat().st_size != owner.file_size
+                ):
+                    adoption_error = "the existing target size differs from its database row"
+                if adoption_error is None:
+                    task.output_probe = self.audio_converter.probe(target)
+                    adoption_error = self._existing_target_probe_error(
+                        task, task.output_probe
+                    )
+                if (
+                    adoption_error is None
+                    and use_local_original_backup
+                    and replace_existing_targets
+                ):
+                    target_stat = target.stat()
+                    task.reuse_existing_target = True
+                    task.adopt_existing_target = True
+                    task.new_file_size = target_stat.st_size
+                    adopted_target_stats[id(task)] = (
+                        target_stat.st_size,
+                        target_stat.st_mtime_ns,
+                    )
 
             if not self._is_within(summary.usb_root, source):
                 task.error = f"Unsafe source path escapes the USB root: {task.track.file_path}"
@@ -1020,15 +1178,22 @@ class ConversionEngine:
                 summary.usb_root, task.anlz_2ex_path
             ):
                 task.error = f"Unsafe ANLZ path escapes the USB root: {task.track.analyze_path}"
-            elif not source.is_file():
-                task.error = f"Source file not found or not a regular file: {source}"
+            elif not source.is_file() and not task.adopt_existing_target:
+                if adoption_error:
+                    task.error = (
+                        f"Source is missing and the existing target cannot be safely adopted: "
+                        f"{adoption_error}: {target}"
+                    )
+                else:
+                    task.error = f"Source file not found or not a regular file: {source}"
             elif PurePosixPath(task.track.file_path).name != task.track.filename:
                 task.error = (
                     "Database filename and file path disagree: "
                     f"'{task.track.filename}' vs '{task.track.file_path}'"
                 )
             elif (
-                task.source_size_at_scan is not None
+                source.is_file()
+                and task.source_size_at_scan is not None
                 and source.stat().st_size != task.source_size_at_scan
             ):
                 task.error = (
@@ -1037,7 +1202,8 @@ class ConversionEngine:
                     f"now {source.stat().st_size} bytes). Scan the drive again before converting."
                 )
             elif (
-                task.source_mtime_ns_at_scan is not None
+                source.is_file()
+                and task.source_mtime_ns_at_scan is not None
                 and source.stat().st_mtime_ns != task.source_mtime_ns_at_scan
             ):
                 task.error = (
@@ -1062,8 +1228,6 @@ class ConversionEngine:
                     other.error = task.error
                     preflight_errors.append(other.error)
             elif source_key != target_key and target.exists():
-                referenced_track_id = database_path_owners.get(target_key)
-                task.existing_target_track_id = referenced_track_id
                 if not use_local_original_backup:
                     task.error = (
                         "An existing target can only be resolved with a verified local "
@@ -1121,14 +1285,43 @@ class ConversionEngine:
                 preflight_errors.append(task.error)
             report_phase("preflight", task_number, total_tasks, task.track.filename)
 
+        current_tracks = {track.id: track for track in pdb_manager.tracks}
+        for repair in summary.analysis_repairs:
+            current_track = current_tracks.get(repair.track.id)
+            if (
+                current_track is None
+                or current_track.file_path != repair.new_audio_path
+                or current_track.analyze_path != repair.track.analyze_path
+            ):
+                preflight_errors.append(
+                    f"Track {repair.track.id} changed after the scan; scan the drive again."
+                )
+                continue
+            audio_path = summary.usb_root / repair.new_audio_path.lstrip("/")
+            if not self._is_within(summary.usb_root, audio_path) or not audio_path.is_file():
+                preflight_errors.append(
+                    f"Waveform repair target audio is missing or unsafe: {audio_path}"
+                )
+                continue
+            for sidecar in repair.sidecar_paths:
+                if (
+                    not self._is_within(summary.usb_root, sidecar)
+                    or not sidecar.is_file()
+                    or ANLZManager.read_path(sidecar) != repair.old_audio_path
+                ):
+                    preflight_errors.append(
+                        f"Analysis file changed after the scan: {sidecar}"
+                    )
+                    break
+
         if preflight_errors:
             return {
                 "success": False,
-                "error": "Preflight checks failed; no files were converted.",
+                "error": "Preflight checks failed; no changes were made.",
                 "preflight_errors": preflight_errors,
-                "total": total_tasks,
+                "total": total_work,
                 "completed": 0,
-                "failed": len([task for task in summary.tasks if task.error]),
+                "failed": len(preflight_errors),
                 "cleaned_dotfiles": 0,
             }
 
@@ -1145,9 +1338,9 @@ class ConversionEngine:
                 return {
                     "success": False,
                     "error": f"Local original backup is unavailable: {exc}",
-                    "total": total_tasks,
+                    "total": total_work,
                     "completed": 0,
-                    "failed": total_tasks,
+                    "failed": total_work,
                     "cleaned_dotfiles": 0,
                 }
             if local_required > local_free:
@@ -1158,9 +1351,9 @@ class ConversionEngine:
                         f"{local_required / (1024 ** 2):.1f} MiB required, "
                         f"{local_free / (1024 ** 2):.1f} MiB available."
                     ),
-                    "total": total_tasks,
+                    "total": total_work,
                     "completed": 0,
-                    "failed": total_tasks,
+                    "failed": total_work,
                     "cleaned_dotfiles": 0,
                 }
 
@@ -1182,9 +1375,9 @@ class ConversionEngine:
                     f"{required_space / (1024 ** 2):.1f} MiB required, "
                     f"{free_space / (1024 ** 2):.1f} MiB available."
                 ),
-                "total": total_tasks,
+                "total": total_work,
                 "completed": 0,
-                "failed": total_tasks,
+                "failed": total_work,
                 "cleaned_dotfiles": 0,
             }
 
@@ -1196,6 +1389,12 @@ class ConversionEngine:
                 for task in summary.tasks
                 for path in (task.anlz_dat_path, task.anlz_ext_path, task.anlz_2ex_path)
                 if path and path.is_file()
+            )
+            metadata_paths.update(
+                sidecar
+                for repair in summary.analysis_repairs
+                for sidecar in repair.sidecar_paths
+                if sidecar.is_file()
             )
             for dlp_path in (
                 summary.usb_root / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db",
@@ -1229,9 +1428,9 @@ class ConversionEngine:
                 return {
                     "success": False,
                     "error": f"Could not create verified local original backup: {exc}",
-                    "total": total_tasks,
+                    "total": total_work,
                     "completed": 0,
-                    "failed": total_tasks,
+                    "failed": total_work,
                     "cleaned_dotfiles": 0,
                     "local_backup_session": str(local_session.path) if local_session else "",
                 }
@@ -1254,6 +1453,11 @@ class ConversionEngine:
                         if anlz_path and anlz_path not in backed_up_paths:
                             self._backup_file(anlz_path)
                             backed_up_paths.add(anlz_path)
+                for repair in summary.analysis_repairs:
+                    for sidecar in repair.sidecar_paths:
+                        if sidecar not in backed_up_paths:
+                            self._backup_file(sidecar)
+                            backed_up_paths.add(sidecar)
             except Exception as exc:
                 return {"success": False, "error": f"Could not create required backups: {exc}"}
 
@@ -1265,6 +1469,16 @@ class ConversionEngine:
 
         def convert_to_stage(task: ConversionTask):
             task.status = "converting"
+            if task.adopt_existing_target:
+                expected_stat = adopted_target_stats[id(task)]
+                current_stat = task.target_abs_path.stat()
+                if (current_stat.st_size, current_stat.st_mtime_ns) != expected_stat:
+                    task.status = "failed"
+                    task.error = (
+                        "Existing target changed after preflight; scan the drive again"
+                    )
+                    return False
+                return True
             stage = task.target_abs_path.with_name(
                 f".{task.target_abs_path.stem}.rbconvert-{uuid.uuid4().hex}{task.target_abs_path.suffix}"
             )
@@ -1302,7 +1516,7 @@ class ConversionEngine:
 
         def commit_task(task: ConversionTask) -> bool:
             nonlocal anlz_updated
-            stage = staged_paths[id(task)]
+            stage = staged_paths.get(id(task))
             source = task.source_abs_path
             target = task.target_abs_path
             same_path = self._path_key(source) == self._path_key(target)
@@ -1337,7 +1551,25 @@ class ConversionEngine:
                     )
                 if not task.reuse_existing_target and not same_path and target.exists():
                     raise RuntimeError(f"Target appeared during conversion; refusing to overwrite: {target}")
-                if task.reuse_existing_target:
+                if task.adopt_existing_target:
+                    expected_stat = adopted_target_stats[id(task)]
+                    target_stat = target.stat()
+                    if (target_stat.st_size, target_stat.st_mtime_ns) != expected_stat:
+                        raise RuntimeError(
+                            "Existing target changed while conversion was running"
+                        )
+                    task.output_probe = self.audio_converter.probe(target)
+                    probe_error = self._existing_target_probe_error(
+                        task, task.output_probe
+                    )
+                    if probe_error:
+                        raise RuntimeError(
+                            f"Existing target is no longer safe to adopt: {probe_error}"
+                        )
+                    task.new_file_size = target_stat.st_size
+                elif task.reuse_existing_target:
+                    if stage is None:
+                        raise RuntimeError("Internal error: converted staging file is missing")
                     staged_hash = self.audio_converter.decoded_audio_sha256(stage)
                     existing_hash = self.audio_converter.decoded_audio_sha256(target)
                     if staged_hash != existing_hash:
@@ -1357,7 +1589,10 @@ class ConversionEngine:
                         task.anlz_ext_path,
                         task.anlz_2ex_path,
                     ):
-                        if anlz_path and ANLZManager.read_path(anlz_path) != track_snapshot["file_path"]:
+                        if anlz_path and ANLZManager.read_path(anlz_path) not in {
+                            track_snapshot["file_path"],
+                            task.target_usb_path if task.adopt_existing_target else "",
+                        }:
                             raise RuntimeError(
                                 f"ANLZ file changed while conversion was running: {anlz_path}"
                             )
@@ -1368,6 +1603,8 @@ class ConversionEngine:
                     )
                     os.replace(source, source_backup)
                 if not task.reuse_existing_target:
+                    if stage is None:
+                        raise RuntimeError("Internal error: converted staging file is missing")
                     os.replace(stage, target)
                     self._sync_directory(target.parent)
 
@@ -1410,16 +1647,17 @@ class ConversionEngine:
                             continue
                         if not anlz_path.is_file():
                             raise RuntimeError(f"ANLZ file disappeared during conversion: {anlz_path}")
-                        anlz_snapshots[anlz_path] = anlz_path.read_bytes()
-                        if not ANLZManager.update_path(
-                            anlz_path, task.target_usb_path, backup=False
-                        ):
-                            raise RuntimeError(f"Could not update PPTH path in {anlz_path}")
-                        updated_anlz_paths += 1
+                        if ANLZManager.read_path(anlz_path) != task.target_usb_path:
+                            anlz_snapshots[anlz_path] = anlz_path.read_bytes()
+                            if not ANLZManager.update_path(
+                                anlz_path, task.target_usb_path, backup=False
+                            ):
+                                raise RuntimeError(f"Could not update PPTH path in {anlz_path}")
+                            updated_anlz_paths += 1
 
-                if local_session:
+                if local_session and not task.adopt_existing_target:
                     local_session.mark_converted(task)
-                elif delete_original:
+                elif delete_original and not task.adopt_existing_target:
                     obsolete = source_backup if same_path else source
                     if obsolete:
                         try:
@@ -1463,7 +1701,8 @@ class ConversionEngine:
                         if local_session:
                             if not task.reuse_existing_target:
                                 target.unlink(missing_ok=True)
-                            local_session.restore_task_after_failure(task)
+                            if not task.adopt_existing_target:
+                                local_session.restore_task_after_failure(task)
                         elif same_path and source_backup and source_backup.exists():
                             target.unlink(missing_ok=True)
                             os.replace(source_backup, source)
@@ -1473,10 +1712,11 @@ class ConversionEngine:
                         warnings.append(f"Could not remove staged target during rollback: {rollback_exc}")
                 return False
             finally:
-                try:
-                    stage.unlink(missing_ok=True)
-                except OSError as cleanup_exc:
-                    warnings.append(f"Could not remove staging file {stage}: {cleanup_exc}")
+                if stage is not None:
+                    try:
+                        stage.unlink(missing_ok=True)
+                    except OSError as cleanup_exc:
+                        warnings.append(f"Could not remove staging file {stage}: {cleanup_exc}")
 
         max_workers = max(1, min(threads, total_tasks if total_tasks > 0 else 1))
         report_phase("conversion", 0, total_tasks, "Starting audio conversion")
@@ -1494,7 +1734,7 @@ class ConversionEngine:
                 except Exception as exc:
                     task.status = "failed"
                     task.error = f"Unexpected conversion error: {exc}"
-                    if local_session:
+                    if local_session and not task.adopt_existing_target:
                         try:
                             local_session.restore_source_after_failure(task.source_abs_path)
                         except Exception as restore_exc:
@@ -1514,35 +1754,88 @@ class ConversionEngine:
                     except Exception as exc:
                         warnings.append(f"Progress callback failed: {exc}")
 
+        analysis_paths_repaired = 0
+        analysis_repair_error = ""
+        if summary.analysis_repairs:
+            report_phase(
+                "waveform_repair", 0, total_repairs, "Synchronizing waveform paths"
+            )
+            snapshots = {
+                sidecar: sidecar.read_bytes()
+                for repair in summary.analysis_repairs
+                for sidecar in repair.sidecar_paths
+            }
+            try:
+                for current, repair in enumerate(summary.analysis_repairs, start=1):
+                    for sidecar in repair.sidecar_paths:
+                        if ANLZManager.read_path(sidecar) != repair.old_audio_path:
+                            raise RuntimeError(
+                                f"Analysis path changed while repair was running: {sidecar}"
+                            )
+                        if not ANLZManager.update_path(
+                            sidecar, repair.new_audio_path, backup=False
+                        ):
+                            raise RuntimeError(f"Could not update waveform path in {sidecar}")
+                    analysis_paths_repaired += 1
+                    report_phase(
+                        "waveform_repair",
+                        current,
+                        total_repairs,
+                        repair.track.title or repair.track.filename,
+                    )
+            except Exception as exc:
+                rollback_errors = []
+                for sidecar, data in snapshots.items():
+                    try:
+                        self._restore_file_bytes(sidecar, data)
+                    except Exception as rollback_exc:
+                        rollback_errors.append(f"{sidecar}: {rollback_exc}")
+                analysis_paths_repaired = 0
+                analysis_repair_error = f"Could not repair waveform paths: {exc}"
+                if rollback_errors:
+                    analysis_repair_error += "; rollback failed for " + "; ".join(
+                        rollback_errors
+                    )
+                warnings.append(analysis_repair_error)
+
         # Clean AppleDouble ghost files
         cleaned_files = 0
         if clean_dotfiles:
             report_phase("cleanup", 0, 1, "Removing macOS ghost files")
             cleaned_files = self.clean_dotfiles(summary.usb_root)
 
-        if summary.onelibrary_bridge_mode and completed:
+        if summary.onelibrary_bridge_mode and (completed or analysis_paths_repaired):
             warnings.insert(0, ONELIBRARY_REBUILD_REQUIRED_MESSAGE)
 
         local_session_error = ""
         if local_session:
             try:
                 report_phase("finalizing", 0, 1, "Finalizing recovery archive")
-                local_session.finish(failed == 0)
+                local_session.finish(failed == 0 and not analysis_repair_error)
             except Exception as exc:
                 local_session_error = f"Could not finalize local recovery manifest: {exc}"
                 warnings.append(local_session_error)
 
         return {
-            "success": failed == 0 and not local_session_error,
-            "error": local_session_error,
-            "total": total_tasks,
+            "success": failed == 0 and not local_session_error and not analysis_repair_error,
+            "error": local_session_error or analysis_repair_error,
+            "total": total_work,
             "completed": completed,
-            "failed": failed,
+            "failed": failed + (total_repairs if analysis_repair_error else 0),
+            "adopted_existing_targets": len(
+                [
+                    task
+                    for task in summary.tasks
+                    if task.status == "completed" and task.adopt_existing_target
+                ]
+            ),
             "anlz_updated": anlz_updated,
+            "analysis_paths_repaired": analysis_paths_repaired,
             "cleaned_dotfiles": cleaned_files,
             "warnings": warnings,
             "onelibrary_sync_required": bool(
-                summary.onelibrary_bridge_mode and completed
+                summary.onelibrary_bridge_mode
+                and (completed or analysis_paths_repaired)
             ),
             "local_backup_session": str(local_session.path) if local_session else "",
         }

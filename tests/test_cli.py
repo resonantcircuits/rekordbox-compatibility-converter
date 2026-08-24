@@ -36,6 +36,42 @@ def test_scan_device_library_plus_returns_nonzero(tmp_path):
     assert "will not reliably fall back" in result.output
 
 
+def test_scan_reports_compatible_tracks_with_stale_waveform_paths(
+    tmp_path, monkeypatch
+):
+    summary = SimpleNamespace(
+        has_export_pdb=True,
+        has_dlp=False,
+        onelibrary_bridge_mode=False,
+        unsupported_reason="",
+        format_counts={"mp3": 1},
+        total_tracks=1,
+        compatible_tracks=1,
+        incompatible_tracks=0,
+        analysis_repairs=[
+            SimpleNamespace(
+                track=SimpleNamespace(id=42, title="Test Track", filename="test.mp3"),
+                old_audio_path="/Contents/test.flac",
+                new_audio_path="/Contents/test.mp3",
+            )
+        ],
+    )
+
+    class FakeEngine:
+        def scan(self, **_kwargs):
+            return summary
+
+    monkeypatch.setattr(main, "ConversionEngine", FakeEngine)
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path)])
+
+    assert result.exit_code == 0
+    assert "Waveform Paths to Repair" in result.output
+    assert "Test Track" in result.output
+    assert "stored waveform paths need repair" in result.output
+    assert "All tracks are compatible with the selected profile" not in result.output
+
+
 def test_cleanup_originals_cli_runs_verified_plan(tmp_path, monkeypatch):
     plan = SimpleNamespace(
         errors=[],

@@ -102,6 +102,7 @@ class ConversionTask:
     source_mtime_ns_at_scan: Optional[int] = None
     existing_target_track_id: Optional[int] = None
     reuse_existing_target: bool = False
+    adopt_existing_target: bool = False
     status: str = "pending"
     new_file_size: int = 0
     output_probe: Dict = field(default_factory=dict)
@@ -121,6 +122,16 @@ class OriginalCleanupCandidate:
     original_mtime_ns: int
     replacement_size: int
     replacement_mtime_ns: int
+
+
+@dataclass
+class AnalysisPathRepair:
+    """A metadata-only repair for stale ANLZ audio-path references."""
+
+    track: TrackInfo
+    old_audio_path: str
+    new_audio_path: str
+    sidecar_paths: List[Path] = field(default_factory=list)
 
 
 @dataclass
@@ -147,6 +158,7 @@ class ScanSummary:
     incompatible_tracks: int = 0
     format_counts: dict = field(default_factory=dict)
     tasks: List[ConversionTask] = field(default_factory=list)
+    analysis_repairs: List[AnalysisPathRepair] = field(default_factory=list)
     has_export_pdb: bool = False
     has_export_ext_pdb: bool = False
     has_dlp: bool = False

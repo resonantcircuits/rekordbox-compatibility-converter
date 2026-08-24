@@ -205,6 +205,7 @@ class LocalBackupSession:
         unique_originals = {
             str(task.source_abs_path.resolve()).casefold(): task.source_abs_path.resolve()
             for task in tasks
+            if not task.adopt_existing_target
         }
         unique_targets = {
             str(task.target_abs_path.resolve()).casefold(): task.target_abs_path.resolve()
@@ -240,6 +241,8 @@ class LocalBackupSession:
 
         originals_by_path: Dict[str, Dict] = {}
         for task in tasks:
+            if task.adopt_existing_target:
+                continue
             source = task.source_abs_path.resolve()
             key = str(source).casefold()
             if key not in originals_by_path:
