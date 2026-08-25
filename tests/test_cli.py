@@ -55,6 +55,7 @@ def test_scan_reports_compatible_tracks_with_stale_waveform_paths(
                 new_audio_path="/Contents/test.mp3",
             )
         ],
+        bitrate_repairs=[],
     )
 
     class FakeEngine:

@@ -32,6 +32,17 @@ class _FakeWidget:
         self.started = False
 
 
+class _FakeVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
 def _fake_modern_app(launches, threading_smokes=None):
     module = ModuleType("rekordbox_compatibility_converter.gui.modern_app")
 
@@ -216,6 +227,62 @@ def test_conversion_start_is_immediately_visible():
     assert "Conversion started" in status.config["text"]
     assert "do not eject the USB" in status.config["text"]
     assert idle_updates == [True]
+
+
+def test_backup_folder_picker_refreshes_result_without_starting_another_scan(
+    tmp_path, monkeypatch
+):
+    renders = []
+    backup_var = _FakeVar()
+    gui = SimpleNamespace(
+        local_backup_var=backup_var,
+        summary=SimpleNamespace(tasks=[SimpleNamespace()]),
+        is_scanning=False,
+        _render_scan=lambda: renders.append(True),
+    )
+    monkeypatch.setattr(
+        modern_app.filedialog,
+        "askdirectory",
+        lambda **_kwargs: str(tmp_path),
+    )
+
+    selected = ModernRekordboxGUI._browse_local_backup_folder(gui)
+
+    assert selected is True
+    assert backup_var.get() == str(tmp_path)
+    assert renders == [True]
+
+
+def test_required_backup_folder_prompt_explains_location_and_recovery(
+    tmp_path, monkeypatch
+):
+    prompts = []
+    backup_var = _FakeVar()
+    gui = SimpleNamespace(
+        local_backup_var=backup_var,
+        lbl_status=_FakeWidget(),
+    )
+
+    def choose_folder(refresh_summary=True):
+        assert refresh_summary is False
+        backup_var.set(str(tmp_path))
+        return True
+
+    gui._browse_local_backup_folder = choose_folder
+    monkeypatch.setattr(
+        modern_app.messagebox,
+        "showinfo",
+        lambda title, message: prompts.append((title, message)),
+    )
+
+    selected = ModernRekordboxGUI._ensure_local_backup_folder(
+        gui, "Existing converted files must be archived."
+    )
+
+    assert selected == tmp_path
+    assert prompts[0][0] == "Recovery Folder Required"
+    assert "on this computer, not a folder on the USB" in prompts[0][1]
+    assert "restore the USB later" in prompts[0][1]
 
 
 def test_conversion_progress_shows_track_count_and_latest_file():

@@ -187,13 +187,27 @@ def scan(
             )
         console.print(repair_table)
 
-    if summary.incompatible_tracks == 0 and not summary.analysis_repairs:
+    if summary.bitrate_repairs:
+        console.print(
+            f"[bold yellow]Device Library Metadata to Repair:[/bold yellow] "
+            f"{len(summary.bitrate_repairs)}"
+        )
+
+    if (
+        summary.incompatible_tracks == 0
+        and not summary.analysis_repairs
+        and not summary.bitrate_repairs
+    ):
         console.print("\n[bold green]All tracks are compatible with the selected profile.[/bold green]\n")
         return
 
     if summary.incompatible_tracks == 0:
+        if summary.bitrate_repairs:
+            repair_message = "stored Device Library metadata needs repair"
+        else:
+            repair_message = "stored waveform paths need repair"
         console.print(
-            "\n[green]All audio formats are compatible, but stored waveform paths need repair.[/green]\n"
+            f"\n[green]All audio formats are compatible, but {repair_message}.[/green]\n"
         )
         return
 
@@ -409,7 +423,11 @@ def convert(
             console.print("[yellow]Conversion canceled by user.[/yellow]")
             return
 
-    if summary.incompatible_tracks == 0 and not summary.analysis_repairs:
+    if (
+        summary.incompatible_tracks == 0
+        and not summary.analysis_repairs
+        and not summary.bitrate_repairs
+    ):
         console.print("\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n")
         return
 
@@ -419,6 +437,7 @@ def convert(
             f"[bold]Target Profile:[/bold] {escape(hw_profile.name)}\n"
             f"[bold]Tracks to Convert:[/bold] [bold red]{len(summary.tasks)}[/bold red]\n"
             f"[bold]Waveform Paths to Repair:[/bold] [bold yellow]{len(summary.analysis_repairs)}[/bold yellow]\n"
+            f"[bold]Device Library Metadata Repairs:[/bold] [bold yellow]{len(summary.bitrate_repairs)}[/bold yellow]\n"
             f"[bold]Target Audio Format:[/bold] [bold green]{target_format.upper()}[/bold green]\n"
             f"[bold]Lossless Bit Depth:[/bold] {'Enforce 16-bit across USB' if enforce_16_bit else 'Profile default'}\n"
             f"[bold]Parallel Workers:[/bold] {threads} threads\n"
@@ -468,7 +487,11 @@ def convert(
     ) as progress:
         bar = progress.add_task(
             "[cyan]Processing planned tracks...",
-            total=len(summary.tasks) + len(summary.analysis_repairs),
+            total=(
+                len(summary.tasks)
+                + len(summary.analysis_repairs)
+                + len(summary.bitrate_repairs)
+            ),
         )
 
         def on_progress(task, current, total):
@@ -484,6 +507,13 @@ def convert(
                     total=max(1, total),
                     completed=current,
                     description=f"[cyan]Repairing waveform paths: [bold]{escape(detail)}[/bold]",
+                )
+            elif phase == "metadata_repair":
+                progress.update(
+                    bar,
+                    total=max(1, total),
+                    completed=current,
+                    description=f"[cyan]Repairing Device Library metadata: [bold]{escape(detail)}[/bold]",
                 )
 
         result = engine.execute(
@@ -513,6 +543,12 @@ def convert(
             if repaired
             else ""
         )
+        metadata_repaired = result.get("bitrate_metadata_repaired", 0)
+        metadata_repaired_msg = (
+            f"\n• Corrected Device Library bitrate units for {metadata_repaired} track(s)."
+            if metadata_repaired
+            else ""
+        )
         cleaned_msg = f"\n• Cleaned {result.get('cleaned_dotfiles', 0)} macOS ghost files." if clean_dotfiles else ""
         original_msg = (
             f"• Available originals and metadata are preserved in {escape(str(result.get('local_backup_session')))}."
@@ -526,7 +562,7 @@ def convert(
         console.print(
             Panel(
                 f"[bold green]Successfully converted {converted} tracks.[/bold green]"
-                f"{adopted_msg}{repaired_msg}\n"
+                f"{adopted_msg}{repaired_msg}{metadata_repaired_msg}\n"
                 f"• Database [cyan]export.pdb[/cyan] successfully patched and synced.\n"
                 f"• Updated {result.get('anlz_updated', 0)} analysis path files ([cyan]ANLZ[/cyan]).{cleaned_msg}\n"
                 f"{original_msg}{warning_msg}",

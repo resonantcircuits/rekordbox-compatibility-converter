@@ -219,17 +219,18 @@ def test_engine_scan_and_execute_parallel(mock_usb: Path):
 
 
 @pytest.mark.parametrize(
-    ("target_format", "target_extension"),
+    ("target_format", "target_extension", "expected_bitrate"),
     [
-        (TargetFormat.AIFF, "aiff"),
-        (TargetFormat.WAV, "wav"),
-        (TargetFormat.MP3, "mp3"),
+        (TargetFormat.AIFF, "aiff", 705),
+        (TargetFormat.WAV, "wav", 705),
+        (TargetFormat.MP3, "mp3", 320),
     ],
 )
 def test_engine_updates_device_sql_file_type_for_every_target(
     mock_usb: Path,
     target_format: TargetFormat,
     target_extension: str,
+    expected_bitrate: int,
 ):
     engine = ConversionEngine()
     summary = engine.scan(mock_usb, forced_target_format=target_format)
@@ -248,6 +249,58 @@ def test_engine_updates_device_sql_file_type_for_every_target(
     ).tracks[0]
     assert track.extension == target_extension
     assert track.file_type == REKORDBOX_FILE_TYPE_BY_TARGET[target_format]
+    assert track.bitrate == expected_bitrate
+
+
+def test_scan_repairs_v030_bitrate_units_without_touching_audio_or_waveforms(
+    mock_usb: Path,
+):
+    engine = ConversionEngine()
+    initial = engine.scan(mock_usb, forced_target_format=TargetFormat.AIFF)
+    converted = engine.execute(
+        initial,
+        delete_original=False,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+    )
+    assert converted["success"] is True
+
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    manager = PDBManager(pdb_path)
+    track = manager.tracks[0]
+    assert manager.update_track(
+        track=track,
+        new_filename=track.filename,
+        new_filepath=track.file_path,
+        new_filesize=track.file_size,
+        new_sample_rate=track.sample_rate,
+        new_sample_depth=track.sample_depth,
+        new_bitrate=705600,
+        new_file_type=track.file_type,
+    )
+    manager.save(backup=False)
+    audio_path = mock_usb / track.file_path.lstrip("/")
+    anlz_path = mock_usb / track.analyze_path.lstrip("/")
+    audio_before = hashlib.sha256(audio_path.read_bytes()).hexdigest()
+    anlz_before = hashlib.sha256(anlz_path.read_bytes()).hexdigest()
+
+    repair_plan = engine.scan(mock_usb)
+
+    assert repair_plan.tasks == []
+    assert repair_plan.analysis_repairs == []
+    assert len(repair_plan.bitrate_repairs) == 1
+    assert repair_plan.bitrate_repairs[0].old_bitrate == 705600
+    assert repair_plan.bitrate_repairs[0].new_bitrate == 705
+
+    repaired = engine.execute(repair_plan, clean_dotfiles=False)
+
+    assert repaired["success"] is True
+    assert repaired["completed"] == 0
+    assert repaired["bitrate_metadata_repaired"] == 1
+    assert PDBManager(pdb_path).tracks[0].bitrate == 705
+    assert hashlib.sha256(audio_path.read_bytes()).hexdigest() == audio_before
+    assert hashlib.sha256(anlz_path.read_bytes()).hexdigest() == anlz_before
 
 
 def test_engine_refuses_existing_target_without_overwriting(mock_usb: Path):
@@ -674,7 +727,7 @@ def test_missing_original_adopts_strictly_matching_referenced_target(
             analyze_path=task.track.analyze_path,
             sample_rate=task.target_sample_rate,
             sample_depth=task.target_sample_depth,
-            bitrate=320000,
+            bitrate=320,
             file_size=target.stat().st_size,
             file_type=REKORDBOX_FILE_TYPE_BY_TARGET[TargetFormat.MP3],
             duration=task.track.duration,

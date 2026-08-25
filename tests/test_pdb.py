@@ -10,6 +10,7 @@ from rekordbox_compatibility_converter.core.pdb_manager import (
     PAGE_SEQUENCE_OFFSET,
     PDBManager,
     TRACK_FILE_TYPE_OFFSET,
+    device_sql_bitrate_kbps,
 )
 
 
@@ -22,6 +23,7 @@ def create_minimal_pdb(
     file_type: int = 0x05,
     database_sequence: int = 48,
     page_sequence: int = 47,
+    bitrate: int = 1411,
 ) -> Path:
     """Creates a valid, minimal DeviceSQL export.pdb for testing."""
     len_page = 4096
@@ -56,7 +58,6 @@ def create_minimal_pdb(
     # Heap: row at offset 0 (which starts at 0x28)
     row_base = 0x28
     sample_rate = 44100
-    bitrate = 1411200
     track_id = 101
     sample_depth = 16
     duration = 240
@@ -131,6 +132,7 @@ def test_pdb_parse_and_update(tmp_path: Path):
     assert track.file_path == "/Contents/song.flac"
     assert track.sample_rate == 44100
     assert track.sample_depth == 16
+    assert track.bitrate == 1411
     assert track.file_size == 50000000
     assert track.file_type == 0x05
     database_sequence_before = struct.unpack_from(
@@ -148,7 +150,7 @@ def test_pdb_parse_and_update(tmp_path: Path):
         new_filesize=60000000,
         new_sample_rate=44100,
         new_sample_depth=16,
-        new_bitrate=1411200,
+        new_bitrate=1411,
         new_file_type=0x0C,
     )
     mgr.save(backup=False)
@@ -216,7 +218,7 @@ def test_pdb_refuses_growing_string(tmp_path: Path):
         new_filesize=60000000,
         new_sample_rate=44100,
         new_sample_depth=16,
-        new_bitrate=1411200,
+        new_bitrate=1411,
         new_file_type=0x0C,
     )
     assert ok is False
@@ -232,7 +234,7 @@ def test_pdb_refuses_growing_string(tmp_path: Path):
             1,
             44100,
             16,
-            320000,
+            320,
             0x01,
         )
         is True
@@ -313,7 +315,7 @@ def test_pdb_unicode_path_roundtrip(tmp_path: Path):
         1234,
         44100,
         16,
-        1411200,
+        1411,
         0x0C,
     )
     mgr.save(backup=False)
@@ -322,3 +324,10 @@ def test_pdb_unicode_path_roundtrip(tmp_path: Path):
     assert updated.filename == "Beyoncé.aiff"
     assert updated.file_path == "/Contents/Beyoncé.aiff"
     assert updated.file_type == 0x0C
+
+
+def test_device_sql_bitrate_uses_rekordbox_kilobit_units():
+    # Values observed in genuine Rekordbox exports: 44.1 kHz/24-bit WAV is
+    # stored as 2116, while a 320 kbps MP3 is stored as 320.
+    assert device_sql_bitrate_kbps(44100 * 2 * 24) == 2116
+    assert device_sql_bitrate_kbps(320000) == 320

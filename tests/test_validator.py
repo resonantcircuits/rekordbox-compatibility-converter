@@ -97,3 +97,29 @@ def test_validator_rejects_stale_2ex_path(mock_usb: Path, tmp_path: Path):
 
     assert report.failed_tracks == 1
     assert any(".2EX PPTH mismatch" in issue.message for issue in report.issues)
+
+
+def test_validator_flags_bits_per_second_written_into_device_sql(mock_usb: Path):
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    manager = PDBManager(pdb_path)
+    track = manager.tracks[0]
+    row_base = track.page_idx * manager.len_page + track.row_offset
+    struct.pack_into("<I", manager.data, row_base + 0x30, 1411200)
+    manager.save(backup=False)
+    validator = ExportValidator()
+    validator.audio_converter.probe = lambda _path: {
+        "sample_rate": 44100,
+        "bits_per_sample": 16,
+        "channels": 2,
+        "codec_name": "pcm_s16be",
+        "bit_rate": 1411200,
+    }
+
+    report = validator.validate(mock_usb)
+
+    assert report.failed_tracks == 1
+    assert any(
+        "DB says 1411200 kbps" in issue.message
+        and "about 1411 kbps" in issue.message
+        for issue in report.issues
+    )

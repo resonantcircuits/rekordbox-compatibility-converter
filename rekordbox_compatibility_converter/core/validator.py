@@ -8,7 +8,7 @@ from .anlz_manager import ANLZManager
 from .audio_converter import AudioConverter
 from .dlp_manager import ONELIBRARY_PRESENT_MESSAGE
 from .models import REKORDBOX_FILE_TYPE_BY_EXTENSION
-from .pdb_manager import PDBManager
+from .pdb_manager import PDBManager, device_sql_bitrate_kbps
 from .profiles import HardwareProfile
 
 
@@ -189,6 +189,7 @@ class ExportValidator:
                 else:
                     actual_rate = int(probe.get("sample_rate") or 0)
                     actual_depth = int(probe.get("bits_per_sample") or 0)
+                    actual_channels = int(probe.get("channels") or 0)
                     if actual_rate and actual_rate != track.sample_rate:
                         track_has_issue = True
                         report.issues.append(
@@ -209,11 +210,40 @@ class ExportValidator:
                                 f"Bit-depth mismatch: DB says {track.sample_depth}-bit, audio reports {actual_depth}-bit",
                             )
                         )
+                    codec_name = str(probe.get("codec_name") or "")
+                    bitrate_bits_per_second = 0
+                    if (
+                        codec_name.startswith("pcm_")
+                        and actual_rate
+                        and actual_depth
+                        and actual_channels
+                    ):
+                        bitrate_bits_per_second = (
+                            actual_rate * actual_depth * actual_channels
+                        )
+                    elif codec_name == "mp3":
+                        bitrate_bits_per_second = int(probe.get("bit_rate") or 0)
+                    if bitrate_bits_per_second and track.bitrate:
+                        expected_bitrate = device_sql_bitrate_kbps(
+                            bitrate_bits_per_second
+                        )
+                        tolerance = max(2, expected_bitrate // 50)
+                        if abs(track.bitrate - expected_bitrate) > tolerance:
+                            track_has_issue = True
+                            report.issues.append(
+                                ValidationIssue(
+                                    track.id,
+                                    track.title or track.filename,
+                                    "WARNING",
+                                    f"Bitrate mismatch: DB says {track.bitrate} kbps, "
+                                    f"audio reports about {expected_bitrate} kbps",
+                                )
+                            )
                     if profile:
                         actual_track = replace(
                             track,
-                            codec_name=str(probe.get("codec_name") or ""),
-                            channels=int(probe.get("channels") or 2),
+                            codec_name=codec_name,
+                            channels=actual_channels or 2,
                             sample_rate=actual_rate or track.sample_rate,
                             sample_depth=actual_depth or track.sample_depth,
                         )

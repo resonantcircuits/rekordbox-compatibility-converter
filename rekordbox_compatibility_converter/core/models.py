@@ -59,7 +59,7 @@ class TrackInfo:
     analyze_path: str = ""       # e.g. /PIONEER/USBANLZ/P001/00001234/ANLZ0000.DAT
     sample_rate: int = 44100
     sample_depth: int = 16
-    bitrate: int = 1411200
+    bitrate: int = 1411  # DeviceSQL stores whole kilobits per second.
     file_size: int = 0
     file_type: int = RekordboxFileType.UNKNOWN
     duration: int = 0
@@ -135,6 +135,15 @@ class AnalysisPathRepair:
 
 
 @dataclass
+class BitrateMetadataRepair:
+    """A database-only correction for bitrates written in bits per second."""
+
+    track: TrackInfo
+    old_bitrate: int
+    new_bitrate: int
+
+
+@dataclass
 class OriginalCleanupPlan:
     usb_root: Path
     candidates: List[OriginalCleanupCandidate] = field(default_factory=list)
@@ -159,6 +168,7 @@ class ScanSummary:
     format_counts: dict = field(default_factory=dict)
     tasks: List[ConversionTask] = field(default_factory=list)
     analysis_repairs: List[AnalysisPathRepair] = field(default_factory=list)
+    bitrate_repairs: List[BitrateMetadataRepair] = field(default_factory=list)
     has_export_pdb: bool = False
     has_export_ext_pdb: bool = False
     has_dlp: bool = False

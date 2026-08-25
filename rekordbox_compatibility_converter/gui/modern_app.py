@@ -710,24 +710,43 @@ class ModernRekordboxGUI(ctk.CTk):
         )
         self.lbl_profile_desc.pack(fill="x", padx=18, pady=(6, 10))
 
+        archive_label = ctk.CTkLabel(
+            config_card,
+            text="Recovery folder (on this computer)",
+            font=ctk.CTkFont(size=12, weight="bold"),
+            anchor="w",
+        )
+        archive_label.pack(fill="x", padx=18, pady=(0, 4))
         archive_row = ctk.CTkFrame(config_card, fg_color="transparent")
-        archive_row.pack(fill="x", padx=18, pady=(0, 10))
+        archive_row.pack(fill="x", padx=18, pady=(0, 4))
         self.local_backup_var = ctk.StringVar(value="")
         self.local_backup_entry = ctk.CTkEntry(
             archive_row,
             textvariable=self.local_backup_var,
-            placeholder_text="Recovery folder on this computer (required for the space-saving OneLibrary workflow)",
+            placeholder_text="No recovery folder selected",
             height=30,
         )
         self.local_backup_entry.pack(side="left", fill="x", expand=True)
         self.btn_backup_browse = ctk.CTkButton(
             archive_row,
-            text="Choose Backup Folder...",
+            text="Choose Recovery Folder...",
             width=155,
             height=30,
             command=self._browse_local_backup_folder,
         )
         self.btn_backup_browse.pack(side="left", padx=(10, 0))
+        self.local_backup_help = ctk.CTkLabel(
+            config_card,
+            text=(
+                "Stores verified originals and metadata off the USB. Required for OneLibrary "
+                "and when existing converted files must be resolved."
+            ),
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED_TEXT,
+            anchor="w",
+            justify="left",
+        )
+        self.local_backup_help.pack(fill="x", padx=18, pady=(0, 10))
 
         # Divider
         ctk.CTkFrame(config_card, height=1, fg_color=CARD_BORDER).pack(fill="x", padx=18)
@@ -978,14 +997,35 @@ class ModernRekordboxGUI(ctk.CTk):
             self.drive_menu.set(display)
             self._on_drive_selected(display)
 
-    def _browse_local_backup_folder(self):
-        path = filedialog.askdirectory(title="Select Local Original Backup Folder")
+    def _browse_local_backup_folder(self, refresh_summary: bool = True) -> bool:
+        path = filedialog.askdirectory(
+            title="Choose a Recovery Folder on This Computer"
+        )
         if path:
             self.local_backup_var.set(path)
-            if self.summary and self.summary.tasks and not self.is_scanning:
-                self._start_scan(
-                    allow_onelibrary_bridge=self.summary.onelibrary_bridge_mode
-                )
+            if refresh_summary and self.summary and not self.is_scanning:
+                self._render_scan()
+            return True
+        return False
+
+    def _ensure_local_backup_folder(self, reason: str) -> Optional[Path]:
+        """Explain a mandatory recovery archive, then let the user choose it."""
+        current = self.local_backup_var.get().strip()
+        if current:
+            return Path(current).expanduser()
+        messagebox.showinfo(
+            "Recovery Folder Required",
+            f"{reason}\n\n"
+            "Choose a folder on this computer, not a folder on the USB. Before the USB "
+            "is changed, the app will copy and verify the original audio and Rekordbox "
+            "metadata there. You can use that archive to restore the USB later.",
+        )
+        if not self._browse_local_backup_folder(refresh_summary=False):
+            self.lbl_status.configure(
+                text="Conversion canceled: no recovery folder was selected."
+            )
+            return None
+        return Path(self.local_backup_var.get().strip()).expanduser()
 
     def _on_drive_selected(self, choice: str):
         self.scan_generation += 1
@@ -1143,12 +1183,31 @@ class ModernRekordboxGUI(ctk.CTk):
                 ),
                 tags=("odd" if offset % 2 else "even",),
             )
+        metadata_offset = len(self.summary.tasks) + len(self.summary.analysis_repairs)
+        for offset, repair in enumerate(
+            self.summary.bitrate_repairs, start=metadata_offset
+        ):
+            t = repair.track
+            spec = f"{t.sample_rate / 1000:g} kHz / {t.sample_depth}-bit"
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    t.id,
+                    t.title or t.filename,
+                    t.extension.upper(),
+                    spec,
+                    "Repair Device Library metadata",
+                ),
+                tags=("odd" if offset % 2 else "even",),
+            )
 
         total = self.summary.total_tracks
         incompat = self.summary.incompatible_tracks
         compat = self.summary.compatible_tracks
         repairs = len(self.summary.analysis_repairs)
-        planned = incompat + repairs
+        metadata_repairs = len(self.summary.bitrate_repairs)
+        planned = incompat + repairs + metadata_repairs
 
         self.card_total.val_label.configure(text=str(total))
         self.card_compat.val_label.configure(text=str(compat))
@@ -1156,6 +1215,8 @@ class ModernRekordboxGUI(ctk.CTk):
         count_text = f"{incompat} conversions"
         if repairs:
             count_text += f", {repairs} waveform repairs"
+        if metadata_repairs:
+            count_text += f", {metadata_repairs} metadata repairs"
         self.lbl_track_count.configure(text=f"{count_text} of {total} tracks")
 
         if self.summary.onelibrary_bridge_mode:
@@ -1166,7 +1227,8 @@ class ModernRekordboxGUI(ctk.CTk):
             self.btn_convert.configure(text="Convert Tracks (Step 1 of 2)")
             self.lbl_status.configure(
                 text=(
-                    f"Step 1 of 2 ready: {incompat} conversions and {repairs} waveform repairs. "
+                    f"Step 1 of 2 ready: {incompat} conversions, {repairs} waveform repairs, "
+                    f"and {metadata_repairs} metadata repairs. "
                     "You will finish Step 2 in Rekordbox."
                 )
             )
@@ -1176,7 +1238,8 @@ class ModernRekordboxGUI(ctk.CTk):
             self.btn_convert.configure(text="Convert Planned Tracks")
             self.lbl_status.configure(
                 text=(
-                    f"Scan complete: {incompat} conversions and {repairs} waveform repairs planned."
+                    f"Scan complete: {incompat} conversions, {repairs} waveform repairs, "
+                    f"and {metadata_repairs} metadata repairs planned."
                 )
             )
 
@@ -1262,7 +1325,9 @@ class ModernRekordboxGUI(ctk.CTk):
 
     def _start_conversion(self):
         if not self.summary or not (
-            self.summary.tasks or self.summary.analysis_repairs
+            self.summary.tasks
+            or self.summary.analysis_repairs
+            or self.summary.bitrate_repairs
         ):
             return
 
@@ -1275,17 +1340,29 @@ class ModernRekordboxGUI(ctk.CTk):
         threads = int(self.threads_slider.get())
         conversion_summary = self.summary
         bridge_mode = conversion_summary.onelibrary_bridge_mode
+        existing_targets = [
+            task
+            for task in conversion_summary.tasks
+            if task.target_abs_path.is_file()
+            and self.engine._path_key(task.target_abs_path)
+            != self.engine._path_key(task.source_abs_path)
+        ]
         backup_text = self.local_backup_var.get().strip()
-        if bridge_mode and not backup_text:
-            self._browse_local_backup_folder()
-            backup_text = self.local_backup_var.get().strip()
-            if not backup_text:
-                messagebox.showerror(
-                    "Local Backup Folder Required",
-                    "Choose a local folder before starting the OneLibrary conversion.",
-                )
-                return
         local_backup_dir = Path(backup_text).expanduser() if backup_text else None
+        if local_backup_dir is None and (bridge_mode or existing_targets):
+            reasons = []
+            if bridge_mode:
+                reasons.append(
+                    "The OneLibrary two-step workflow requires a local recovery archive."
+                )
+            if existing_targets:
+                reasons.append(
+                    f"{len(existing_targets)} existing converted file(s) must be verified, "
+                    "and any replaced files must be archived."
+                )
+            local_backup_dir = self._ensure_local_backup_folder("\n".join(reasons))
+            if local_backup_dir is None:
+                return
         delete_original = True if bridge_mode else self.del_switch.get() == 1
         if local_backup_dir and not delete_original:
             messagebox.showerror(
@@ -1297,9 +1374,11 @@ class ModernRekordboxGUI(ctk.CTk):
         clean_dotfiles = self.dotfiles_switch.get() == 1
         conversion_count = len(self.summary.tasks)
         repair_count = len(self.summary.analysis_repairs)
+        metadata_repair_count = len(self.summary.bitrate_repairs)
         work_description = (
             f"{conversion_count} track(s) will be converted and {repair_count} stale "
-            "waveform path(s) will be repaired"
+            f"waveform path(s) plus {metadata_repair_count} Device Library metadata "
+            "record(s) will be repaired"
         )
         if bridge_mode:
             bridge_detail = (
@@ -1317,30 +1396,28 @@ class ModernRekordboxGUI(ctk.CTk):
                 default=messagebox.NO,
             )
         else:
+            archive_detail = (
+                f"Recovery copies will be stored in:\n{local_backup_dir}"
+                if local_backup_dir
+                else (
+                    "No recovery folder is selected. Originals removed from the USB will not "
+                    "be saved by this app."
+                )
+                if delete_original
+                else "Original audio files will remain on the USB."
+            )
             confirm = messagebox.askyesno(
                 "Confirm Conversion",
                 f"{work_description}. Conversions use {threads} threads.\n\n"
-                "export.pdb and ANLZ waveforms will be synchronized automatically.",
+                "export.pdb and ANLZ waveforms will be synchronized automatically.\n\n"
+                f"{archive_detail}",
+                default=messagebox.NO,
             )
         if not confirm:
             return
 
-        existing_targets = [
-            task
-            for task in conversion_summary.tasks
-            if task.target_abs_path.is_file()
-            and self.engine._path_key(task.target_abs_path)
-            != self.engine._path_key(task.source_abs_path)
-        ]
         replace_existing_targets = False
         if existing_targets:
-            if not local_backup_dir:
-                messagebox.showerror(
-                    "Local Backup Required",
-                    "Existing conversion targets were found. Choose a local backup folder "
-                    "so they can be archived before replacement.",
-                )
-                return
             referenced_count = sum(
                 task.existing_target_track_id is not None for task in existing_targets
             )
@@ -1385,7 +1462,9 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_restore.configure(state="disabled")
         self.btn_cleanup.configure(state="disabled")
         self._set_conversion_controls(False)
-        self._show_conversion_started(conversion_count + repair_count)
+        self._show_conversion_started(
+            conversion_count + repair_count + metadata_repair_count
+        )
 
         def run():
             try:
@@ -1446,6 +1525,7 @@ class ModernRekordboxGUI(ctk.CTk):
             "cleanup": "Cleaning USB",
             "finalizing": "Finalizing recovery archive",
             "waveform_repair": "Repairing waveform paths",
+            "metadata_repair": "Repairing Device Library metadata",
         }
         label = labels.get(phase, "Preparing conversion")
         if total > 0:
@@ -1476,6 +1556,7 @@ class ModernRekordboxGUI(ctk.CTk):
             "cleanup": "Cleaning USB",
             "finalizing": "Finalizing",
             "waveform_repair": "Repairing waveforms",
+            "metadata_repair": "Repairing metadata",
         }
         if total > 0:
             button_progress = f" {min(100, round(current / total * 100))}%"
@@ -1535,6 +1616,12 @@ class ModernRekordboxGUI(ctk.CTk):
             repaired = result.get("analysis_paths_repaired", 0)
             if repaired:
                 work_summary += f"\nRepaired waveform paths for {repaired} tracks."
+            metadata_repaired = result.get("bitrate_metadata_repaired", 0)
+            if metadata_repaired:
+                work_summary += (
+                    f"\nCorrected Device Library bitrate units for "
+                    f"{metadata_repaired} tracks."
+                )
             if result.get("onelibrary_sync_required"):
                 self.lbl_status.configure(
                     text="Step 1 of 2 complete. Complete Step 2 in Rekordbox before using this USB."

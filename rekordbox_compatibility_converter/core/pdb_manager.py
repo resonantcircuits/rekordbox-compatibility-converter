@@ -15,6 +15,11 @@ DATABASE_SEQUENCE_OFFSET = 0x14
 PAGE_SEQUENCE_OFFSET = 0x10
 
 
+def device_sql_bitrate_kbps(bits_per_second: int) -> int:
+    """Convert an audio bitrate to DeviceSQL's whole-kilobit representation."""
+    return max(0, int(bits_per_second)) // 1000
+
+
 class PDBManager:
     """Reads and updates Rekordbox export.pdb and exportExt.pdb database files."""
 
@@ -355,6 +360,17 @@ class PDBManager:
         track.bitrate = new_bitrate
         track.file_type = new_file_type
 
+        return True
+
+    def update_track_bitrate(self, track: TrackInfo, new_bitrate: int) -> bool:
+        """Update only the DeviceSQL bitrate field for a metadata-only repair."""
+        if not 0 <= new_bitrate <= 0xFFFFFFFF:
+            return False
+        row_base = track.page_idx * self.len_page + track.row_offset
+        if row_base < 0 or row_base + 0x34 > len(self.data):
+            return False
+        struct.pack_into("<I", self.data, row_base + 0x30, new_bitrate)
+        track.bitrate = new_bitrate
         return True
 
     def save(self, backup: bool = True) -> Path:

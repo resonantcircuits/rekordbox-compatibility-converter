@@ -21,6 +21,7 @@ from .dlp_manager import (
 from .local_backup import LocalBackupSession
 from .models import (
     AnalysisPathRepair,
+    BitrateMetadataRepair,
     ConversionTask,
     OriginalCleanupCandidate,
     OriginalCleanupPlan,
@@ -30,7 +31,7 @@ from .models import (
     TargetFormat,
     TrackInfo,
 )
-from .pdb_manager import PDBManager
+from .pdb_manager import PDBManager, device_sql_bitrate_kbps
 from .profiles import HardwareProfile, get_profile
 from .subprocess_utils import run_external
 
@@ -54,6 +55,20 @@ class ConversionEngine:
     def _path_key(path: Path) -> str:
         """Uses a conservative case-insensitive key suitable for common USB filesystems."""
         return str(path.resolve(strict=False)).casefold()
+
+    @staticmethod
+    def _probed_device_sql_bitrate(probe: dict) -> int:
+        """Return a probe's expected DeviceSQL bitrate, or zero if unsupported."""
+        codec_name = str(probe.get("codec_name") or "")
+        if codec_name.startswith("pcm_"):
+            rate = int(probe.get("sample_rate") or 0)
+            depth = int(probe.get("bits_per_sample") or 0)
+            channels = int(probe.get("channels") or 0)
+            if rate and depth and channels:
+                return device_sql_bitrate_kbps(rate * depth * channels)
+        if codec_name == "mp3":
+            return device_sql_bitrate_kbps(int(probe.get("bit_rate") or 0))
+        return 0
 
     @staticmethod
     def _existing_owner_matches_task(
@@ -405,6 +420,26 @@ class ConversionEngine:
                 )
             if check.is_compatible:
                 summary.compatible_tracks += 1
+                if (
+                    ext in {"aif", "aiff", "wav", "wave", "mp3"}
+                    and self._is_within(usb_root, source_abs)
+                    and source_abs.is_file()
+                ):
+                    probe = self.audio_converter.probe(source_abs)
+                    if not probe.get("probe_error"):
+                        expected_bitrate = self._probed_device_sql_bitrate(probe)
+                        if (
+                            expected_bitrate
+                            and track.bitrate >= 100000
+                            and track.bitrate // 1000 == expected_bitrate
+                        ):
+                            summary.bitrate_repairs.append(
+                                BitrateMetadataRepair(
+                                    track=track,
+                                    old_bitrate=track.bitrate,
+                                    new_bitrate=expected_bitrate,
+                                )
+                            )
                 repair = self._plan_analysis_path_repair(
                     usb_root, track, source_abs
                 )
@@ -1016,7 +1051,8 @@ class ConversionEngine:
         """Execute conversion, optionally archiving originals off the USB first."""
         total_tasks = len(summary.tasks)
         total_repairs = len(summary.analysis_repairs)
-        total_work = total_tasks + total_repairs
+        total_bitrate_repairs = len(summary.bitrate_repairs)
+        total_work = total_tasks + total_repairs + total_bitrate_repairs
 
         def report_phase(phase: str, current: int, total: int, detail: str = "") -> None:
             if not phase_callback:
@@ -1286,6 +1322,17 @@ class ConversionEngine:
             report_phase("preflight", task_number, total_tasks, task.track.filename)
 
         current_tracks = {track.id: track for track in pdb_manager.tracks}
+        for repair in summary.bitrate_repairs:
+            current_track = current_tracks.get(repair.track.id)
+            if (
+                current_track is None
+                or current_track.file_path != repair.track.file_path
+                or current_track.bitrate != repair.old_bitrate
+            ):
+                preflight_errors.append(
+                    f"Track {repair.track.id} bitrate metadata changed after the scan; "
+                    "scan the drive again."
+                )
         for repair in summary.analysis_repairs:
             current_track = current_tracks.get(repair.track.id)
             if (
@@ -1611,13 +1658,14 @@ class ConversionEngine:
                 actual_rate = int(task.output_probe.get("sample_rate") or task.target_sample_rate)
                 if task.target_format == TargetFormat.MP3:
                     actual_depth = 16
-                    new_bitrate = 320000
+                    bitrate_bits_per_second = 320000
                 else:
                     actual_depth = int(
                         task.output_probe.get("bits_per_sample") or task.target_sample_depth
                     )
                     channels = int(task.output_probe.get("channels") or 2)
-                    new_bitrate = actual_rate * channels * actual_depth
+                    bitrate_bits_per_second = actual_rate * channels * actual_depth
+                new_bitrate = device_sql_bitrate_kbps(bitrate_bits_per_second)
 
                 if not pdb_manager.update_track(
                     track=task.track,
@@ -1798,30 +1846,88 @@ class ConversionEngine:
                     )
                 warnings.append(analysis_repair_error)
 
+        bitrate_metadata_repaired = 0
+        bitrate_repair_error = ""
+        if summary.bitrate_repairs:
+            report_phase(
+                "metadata_repair",
+                0,
+                total_bitrate_repairs,
+                "Correcting Device Library bitrate units",
+            )
+            pdb_snapshot = bytes(pdb_manager.data)
+            try:
+                for current, repair in enumerate(summary.bitrate_repairs, start=1):
+                    track = next(
+                        item for item in pdb_manager.tracks if item.id == repair.track.id
+                    )
+                    if track.bitrate != repair.old_bitrate:
+                        raise RuntimeError(
+                            f"Track {track.id} bitrate changed while repair was running"
+                        )
+                    if not pdb_manager.update_track_bitrate(
+                        track, repair.new_bitrate
+                    ):
+                        raise RuntimeError(
+                            f"Device Library rejected bitrate repair for track {track.id}"
+                        )
+                    bitrate_metadata_repaired += 1
+                    report_phase(
+                        "metadata_repair",
+                        current,
+                        total_bitrate_repairs,
+                        track.title or track.filename,
+                    )
+                pdb_manager.save(backup=False)
+            except Exception as exc:
+                bitrate_metadata_repaired = 0
+                bitrate_repair_error = f"Could not repair bitrate metadata: {exc}"
+                try:
+                    self._restore_file_bytes(pdb_path, pdb_snapshot)
+                    pdb_manager = PDBManager(pdb_path)
+                except Exception as rollback_exc:
+                    bitrate_repair_error += f"; rollback failed: {rollback_exc}"
+                warnings.append(bitrate_repair_error)
+
         # Clean AppleDouble ghost files
         cleaned_files = 0
         if clean_dotfiles:
             report_phase("cleanup", 0, 1, "Removing macOS ghost files")
             cleaned_files = self.clean_dotfiles(summary.usb_root)
 
-        if summary.onelibrary_bridge_mode and (completed or analysis_paths_repaired):
+        if summary.onelibrary_bridge_mode and (
+            completed or analysis_paths_repaired or bitrate_metadata_repaired
+        ):
             warnings.insert(0, ONELIBRARY_REBUILD_REQUIRED_MESSAGE)
 
         local_session_error = ""
         if local_session:
             try:
                 report_phase("finalizing", 0, 1, "Finalizing recovery archive")
-                local_session.finish(failed == 0 and not analysis_repair_error)
+                local_session.finish(
+                    failed == 0
+                    and not analysis_repair_error
+                    and not bitrate_repair_error
+                )
             except Exception as exc:
                 local_session_error = f"Could not finalize local recovery manifest: {exc}"
                 warnings.append(local_session_error)
 
         return {
-            "success": failed == 0 and not local_session_error and not analysis_repair_error,
-            "error": local_session_error or analysis_repair_error,
+            "success": (
+                failed == 0
+                and not local_session_error
+                and not analysis_repair_error
+                and not bitrate_repair_error
+            ),
+            "error": local_session_error or analysis_repair_error or bitrate_repair_error,
             "total": total_work,
             "completed": completed,
-            "failed": failed + (total_repairs if analysis_repair_error else 0),
+            "failed": (
+                failed
+                + (total_repairs if analysis_repair_error else 0)
+                + (total_bitrate_repairs if bitrate_repair_error else 0)
+            ),
             "adopted_existing_targets": len(
                 [
                     task
@@ -1831,11 +1937,12 @@ class ConversionEngine:
             ),
             "anlz_updated": anlz_updated,
             "analysis_paths_repaired": analysis_paths_repaired,
+            "bitrate_metadata_repaired": bitrate_metadata_repaired,
             "cleaned_dotfiles": cleaned_files,
             "warnings": warnings,
             "onelibrary_sync_required": bool(
                 summary.onelibrary_bridge_mode
-                and (completed or analysis_paths_repaired)
+                and (completed or analysis_paths_repaired or bitrate_metadata_repaired)
             ),
             "local_backup_session": str(local_session.path) if local_session else "",
         }
