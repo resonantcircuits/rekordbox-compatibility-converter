@@ -1,7 +1,14 @@
 """Hardware compatibility profiles for Pioneer CDJ/XDJ players."""
 
-from typing import Dict, Optional, Set
-from .models import CompatibilityCheckResult, CompatibilityProfileType, TargetFormat, TrackInfo
+from typing import Dict, Optional, Protocol, Set
+from .models import CompatibilityCheckResult, CompatibilityProfileType, TargetFormat
+
+
+class AudioProperties(Protocol):
+    extension: str
+    codec_name: str
+    sample_rate: int
+    sample_depth: int
 
 
 class HardwareProfile:
@@ -35,7 +42,7 @@ class HardwareProfile:
         self.target_sample_rate = target_sample_rate
         self.target_sample_depth = target_sample_depth
 
-    def evaluate(self, track: TrackInfo) -> CompatibilityCheckResult:
+    def evaluate(self, track: AudioProperties) -> CompatibilityCheckResult:
         ext = track.extension.lower()
         codec = track.codec_name.lower()
         effective_format = ext

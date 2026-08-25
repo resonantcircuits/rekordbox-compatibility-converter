@@ -14,6 +14,7 @@ This tool points directly at an exported Rekordbox USB drive and:
 3. Synchronizes Pioneer's binary analysis files (**`PIONEER/USBANLZ/.../ANLZxxxx.DAT`, `.EXT` & `.2EX`** - PMAI/PPTH tags) so waveforms, beatgrids, and hot cues load instantly without re-analysis.
 4. Cleans macOS hidden AppleDouble (`._*`) and `.DS_Store` ghost files that cause CDJs to freeze or report read errors.
 5. Provides space-saving conversion by hash-verifying originals in a user-selected local recovery archive before removing them from the USB; the final converted library must still fit.
+6. Provides a separate Audio Folder workflow that creates a CDJ-compatible destination tree without modifying sources or creating Rekordbox library/analysis data.
 
 ---
 
@@ -42,12 +43,13 @@ rekordbox_compatibility_converter/
 │   ├── anlz_manager.py     # Binary PMAI / PPTH ANLZ parser and header synchronizer
 │   ├── dlp_manager.py      # DeviceLibraryPlus (exportLibrary.db) manager
 │   ├── audio_converter.py  # Multi-format FFmpeg converter with TPDF dithering
+│   ├── folder_engine.py     # Standalone folder scanner, copier, and converter
 │   ├── local_backup.py     # Verified off-USB original/metadata archive and guarded restore
 │   ├── usb_detector.py     # Cross-platform USB mount point detector
 │   ├── validator.py        # End-to-end database, audio, and ANLZ integrity checker
 │   └── engine.py           # Multi-threaded orchestrator, backup/restore, dotfile cleaner
 ├── cli/
-│   └── main.py             # Rich CLI (scan, convert, verify, restore, drives, profiles)
+│   └── main.py             # Rich CLI (USB commands plus standalone folder conversion)
 ├── gui/
 │   ├── app.py              # GUI entrypoint with graceful fallback
 │   └── modern_app.py       # CustomTkinter modern dark/light UI

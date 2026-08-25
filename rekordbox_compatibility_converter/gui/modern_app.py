@@ -20,6 +20,7 @@ from ..core.dlp_manager import (
     ONELIBRARY_REBUILD_REQUIRED_MESSAGE,
 )
 from ..core.engine import DEFAULT_CONVERSION_THREADS, ConversionEngine
+from ..core.folder_engine import FolderConversionEngine, FolderScanSummary
 from ..core.models import (
     CompatibilityProfileType,
     OriginalCleanupPlan,
@@ -155,8 +156,26 @@ WORKFLOW_HELP = """ONELIBRARY TWO-STEP WORKFLOW
 
 The Restore Backup button can restore a local recovery session if the USB has not changed independently."""
 
+FOLDER_WORKFLOW_HELP = """AUDIO FOLDER WORKFLOW
+1. Choose a source folder and a separate destination folder.
+2. Choose a compatibility profile and scan the audio files.
+3. Convert only incompatible files to preserve quality, or normalize every file to one format.
+4. Keep Copy compatible files unchanged enabled for a complete destination collection.
+5. Review the plan and create the collection. Source files are never modified.
+
+Supported inputs are AIFF, WAV, MP3, FLAC, and M4A/MP4 files containing AAC or ALAC. Other file types are left out of the plan.
+
+The destination contains audio files only. This mode does not create a Rekordbox Device Library, playlists, beatgrids, cues, or waveform analysis. Import the destination into Rekordbox when those features are needed.
+
+Existing destination files, output-name collisions, changed sources, unsafe paths, and insufficient space stop conversion before output is committed."""
+
 PREFERENCES_PATH = Path.home() / ".rekordbox-format-checker.json"
 GUIDANCE_SETTING_LABEL = "Show guidance popups"
+WORKFLOW_MODES = ("Rekordbox USB", "Audio Folder")
+FOLDER_MODE_HELP = (
+    "Audio files only; no Rekordbox playlists, cues, beatgrids, or waveform analysis "
+    "are created."
+)
 
 # (light, dark) color pairs, WCAG-checked in both modes
 MUTED_TEXT = ("gray35", "gray65")
@@ -177,7 +196,11 @@ class ModernRekordboxGUI(ctk.CTk):
         self.minsize(860, 640)
 
         self.engine = ConversionEngine()
+        self.folder_engine = FolderConversionEngine(
+            audio_converter=self.engine.audio_converter
+        )
         self.summary: Optional[ScanSummary] = None
+        self.folder_summary: Optional[FolderScanSummary] = None
         self.is_converting = False
         self.is_cleanup_running = False
         self.cleanup_previous_convert_state = "disabled"
@@ -188,6 +211,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self.show_guidance_var = tk.BooleanVar(
             value=bool(self.preferences.get("show_guidance_dialogs", True))
         )
+        self.mode_var = tk.StringVar(value="Rekordbox USB")
 
         self._build_menu()
         self._build_ui()
@@ -252,6 +276,9 @@ class ModernRekordboxGUI(ctk.CTk):
         )
         help_menu.add_command(
             label="OneLibrary workflow...", command=self._show_workflow_help
+        )
+        help_menu.add_command(
+            label="Audio Folder workflow...", command=self._show_folder_workflow_help
         )
         help_menu.add_separator()
         help_menu.add_command(
@@ -468,6 +495,9 @@ class ModernRekordboxGUI(ctk.CTk):
     def _show_workflow_help(self) -> None:
         messagebox.showinfo("OneLibrary Workflow", WORKFLOW_HELP)
 
+    def _show_folder_workflow_help(self) -> None:
+        messagebox.showinfo("Audio Folder Workflow", FOLDER_WORKFLOW_HELP)
+
     # ------------------------------------------------------------------ theming
 
     def _apply_treeview_theme(self, mode: str):
@@ -560,13 +590,14 @@ class ModernRekordboxGUI(ctk.CTk):
             font=ctk.CTkFont(size=21, weight="bold"),
             anchor="w",
         ).pack(anchor="w")
-        ctk.CTkLabel(
+        self.subtitle_label = ctk.CTkLabel(
             title_box,
             text="Check a Rekordbox USB, convert unsupported audio, and keep its library paths in sync",
             font=ctk.CTkFont(size=12),
             text_color=MUTED_TEXT,
             anchor="w",
-        ).pack(anchor="w", pady=(1, 0))
+        )
+        self.subtitle_label.pack(anchor="w", pady=(1, 0))
 
         theme_box = ctk.CTkFrame(header, fg_color="transparent")
         theme_box.pack(side="right")
@@ -588,6 +619,25 @@ class ModernRekordboxGUI(ctk.CTk):
             font=ctk.CTkFont(size=11),
         )
         self.guidance_switch.pack(anchor="e", pady=(8, 0))
+
+        mode_bar = ctk.CTkFrame(self, fg_color="transparent")
+        mode_bar.pack(side="top", fill="x", padx=24, pady=(0, 2))
+        self.mode_switch = ctk.CTkSegmentedButton(
+            mode_bar,
+            values=list(WORKFLOW_MODES),
+            variable=self.mode_var,
+            command=self._on_mode_changed,
+            height=32,
+        )
+        self.mode_switch.pack(side="left")
+        self.mode_help_label = ctk.CTkLabel(
+            mode_bar,
+            text="Preserves Device Library paths, playlists, cues, beatgrids, and waveforms.",
+            font=ctk.CTkFont(size=11),
+            text_color=MUTED_TEXT,
+            anchor="w",
+        )
+        self.mode_help_label.pack(side="left", padx=(12, 0))
 
         # 2. Bottom Progress & Status Bar (packed first on bottom so it is never clipped)
         bottom_frame = ctk.CTkFrame(self, corner_radius=12, border_width=1, border_color=CARD_BORDER)
@@ -612,6 +662,7 @@ class ModernRekordboxGUI(ctk.CTk):
 
         grid = ctk.CTkFrame(config_card, fg_color="transparent")
         grid.pack(fill="x", padx=18, pady=(14, 16))
+        self.usb_source_frame = grid
         grid.grid_columnconfigure(0, weight=1)
 
         # Drive row
@@ -632,9 +683,99 @@ class ModernRekordboxGUI(ctk.CTk):
         )
         self.btn_refresh.grid(row=1, column=2, padx=(8, 0), pady=(4, 0))
 
+        self.folder_source_frame = ctk.CTkFrame(
+            config_card, fg_color="transparent"
+        )
+        self.folder_source_frame.grid_columnconfigure(0, weight=1)
+        self.folder_source_var = ctk.StringVar(value="")
+        self.folder_destination_var = ctk.StringVar(value="")
+        self.folder_policy_var = ctk.StringVar(
+            value="Convert only incompatible files"
+        )
+        self.folder_recursive_var = tk.BooleanVar(value=True)
+        self.folder_copy_compatible_var = tk.BooleanVar(value=True)
+
+        self._field_label(self.folder_source_frame, "Source audio folder").grid(
+            row=0, column=0, sticky="w"
+        )
+        self.folder_source_entry = ctk.CTkEntry(
+            self.folder_source_frame,
+            textvariable=self.folder_source_var,
+            placeholder_text="Choose a folder containing audio files",
+            height=32,
+        )
+        self.folder_source_entry.grid(row=1, column=0, sticky="ew", pady=(4, 0))
+        self.folder_source_button = ctk.CTkButton(
+            self.folder_source_frame,
+            text="Choose Source...",
+            width=130,
+            height=32,
+            command=self._browse_folder_source,
+        )
+        self.folder_source_button.grid(
+            row=1, column=1, padx=(10, 0), pady=(4, 0)
+        )
+
+        self._field_label(self.folder_source_frame, "Destination folder").grid(
+            row=2, column=0, sticky="w", pady=(10, 0)
+        )
+        self.folder_destination_entry = ctk.CTkEntry(
+            self.folder_source_frame,
+            textvariable=self.folder_destination_var,
+            placeholder_text="A separate output folder; originals are never overwritten",
+            height=32,
+        )
+        self.folder_destination_entry.grid(
+            row=3, column=0, sticky="ew", pady=(4, 0)
+        )
+        self.folder_destination_button = ctk.CTkButton(
+            self.folder_source_frame,
+            text="Choose Destination...",
+            width=150,
+            height=32,
+            command=self._browse_folder_destination,
+        )
+        self.folder_destination_button.grid(
+            row=3, column=1, padx=(10, 0), pady=(4, 0)
+        )
+
+        folder_options = ctk.CTkFrame(
+            self.folder_source_frame, fg_color="transparent"
+        )
+        folder_options.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        self.folder_policy_menu = ctk.CTkOptionMenu(
+            folder_options,
+            values=[
+                "Convert only incompatible files",
+                "Normalize every audio file",
+            ],
+            variable=self.folder_policy_var,
+            width=225,
+            height=30,
+            command=lambda _choice: self._folder_setting_changed(),
+        )
+        self.folder_policy_menu.pack(side="left")
+        self.folder_recursive_switch = ctk.CTkSwitch(
+            folder_options,
+            text="Include subfolders",
+            variable=self.folder_recursive_var,
+            command=self._folder_setting_changed,
+            font=ctk.CTkFont(size=12),
+        )
+        self.folder_recursive_switch.pack(side="left", padx=(18, 0))
+        self.folder_copy_switch = ctk.CTkSwitch(
+            folder_options,
+            text="Copy compatible files unchanged",
+            variable=self.folder_copy_compatible_var,
+            command=self._folder_setting_changed,
+            font=ctk.CTkFont(size=12),
+        )
+        self.folder_copy_switch.pack(side="left", padx=(18, 0))
+
         # Settings row: three labeled groups on one aligned grid
         settings = ctk.CTkFrame(config_card, fg_color="transparent")
         settings.pack(fill="x", padx=18, pady=(0, 4))
+        self.settings_frame = settings
 
         profile_heading = ctk.CTkFrame(settings, fg_color="transparent")
         profile_heading.grid(row=0, column=0, sticky="w")
@@ -717,8 +858,10 @@ class ModernRekordboxGUI(ctk.CTk):
             anchor="w",
         )
         archive_label.pack(fill="x", padx=18, pady=(0, 4))
+        self.archive_label = archive_label
         archive_row = ctk.CTkFrame(config_card, fg_color="transparent")
         archive_row.pack(fill="x", padx=18, pady=(0, 4))
+        self.archive_row = archive_row
         self.local_backup_var = ctk.StringVar(value="")
         self.local_backup_entry = ctk.CTkEntry(
             archive_row,
@@ -749,11 +892,15 @@ class ModernRekordboxGUI(ctk.CTk):
         self.local_backup_help.pack(fill="x", padx=18, pady=(0, 10))
 
         # Divider
-        ctk.CTkFrame(config_card, height=1, fg_color=CARD_BORDER).pack(fill="x", padx=18)
+        self.usb_options_divider = ctk.CTkFrame(
+            config_card, height=1, fg_color=CARD_BORDER
+        )
+        self.usb_options_divider.pack(fill="x", padx=18)
 
         # Switches row
         switches_row = ctk.CTkFrame(config_card, fg_color="transparent")
         switches_row.pack(fill="x", padx=18, pady=(10, 14))
+        self.usb_switches_row = switches_row
 
         self.del_switch = ctk.CTkSwitch(switches_row, text="Remove originals after safe commit", font=ctk.CTkFont(size=12))
         self.del_switch.select()
@@ -863,11 +1010,12 @@ class ModernRekordboxGUI(ctk.CTk):
 
         table_header = ctk.CTkFrame(table_card, fg_color="transparent")
         table_header.pack(fill="x", padx=16, pady=(12, 6))
-        ctk.CTkLabel(
+        self.table_header_label = ctk.CTkLabel(
             table_header,
             text="Planned Conversions",
             font=ctk.CTkFont(size=14, weight="bold"),
-        ).pack(side="left")
+        )
+        self.table_header_label.pack(side="left")
         self.lbl_track_count = ctk.CTkLabel(
             table_header,
             text="",
@@ -897,9 +1045,141 @@ class ModernRekordboxGUI(ctk.CTk):
         lbl_title = ctk.CTkLabel(card, text=title.upper(), font=ctk.CTkFont(size=11, weight="bold"), text_color=text_color)
         lbl_title.pack(pady=(0, 12))
         card.val_label = lbl_val
+        card.title_label = lbl_title
         return card
 
     # ------------------------------------------------------------------ handlers
+
+    def _reset_scan_display(self) -> None:
+        self.summary = None
+        self.folder_summary = None
+        self.tree.delete(*self.tree.get_children())
+        self.lbl_track_count.configure(text="")
+        self.card_total.val_label.configure(text="--")
+        self.card_compat.val_label.configure(text="--")
+        self.card_incompat.val_label.configure(text="--")
+        self.btn_convert.configure(state="disabled")
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
+
+    def _on_mode_changed(self, mode: str) -> None:
+        self.scan_generation += 1
+        self.is_scanning = False
+        self._reset_scan_display()
+        if mode == "Audio Folder":
+            self.usb_source_frame.pack_forget()
+            self.folder_source_frame.pack(
+                fill="x",
+                padx=18,
+                pady=(14, 12),
+                before=self.settings_frame,
+            )
+            for widget in (
+                self.archive_label,
+                self.archive_row,
+                self.local_backup_help,
+                self.usb_options_divider,
+                self.usb_switches_row,
+            ):
+                widget.pack_forget()
+            self.btn_restore.pack_forget()
+            self.btn_cleanup.pack_forget()
+            self.subtitle_label.configure(
+                text="Create a separate CDJ-compatible collection from an ordinary audio folder"
+            )
+            self.mode_help_label.configure(
+                text=FOLDER_MODE_HELP
+            )
+            self.btn_scan.configure(text="Scan Audio Folder", state="normal")
+            self.btn_convert.configure(text="Create Compatible Collection")
+            self.table_header_label.configure(text="Planned Folder Output")
+            self.card_total.title_label.configure(text="AUDIO FILES")
+            self.card_compat.title_label.configure(text="ALREADY COMPATIBLE")
+            self.card_incompat.title_label.configure(text="TO CONVERT")
+            self.tree.heading("title", text="File")
+            self.tree.heading("target", text="Output")
+            self.lbl_status.configure(
+                text="Ready. Choose separate source and destination folders, then scan."
+            )
+            self._folder_setting_changed(rescan=False)
+        else:
+            self.folder_source_frame.pack_forget()
+            self.usb_source_frame.pack(
+                fill="x",
+                padx=18,
+                pady=(14, 16),
+                before=self.settings_frame,
+            )
+            self.archive_label.pack(
+                fill="x", padx=18, pady=(0, 4), after=self.lbl_profile_desc
+            )
+            self.archive_row.pack(
+                fill="x", padx=18, pady=(0, 4), after=self.archive_label
+            )
+            self.local_backup_help.pack(
+                fill="x", padx=18, pady=(0, 10), after=self.archive_row
+            )
+            self.usb_options_divider.pack(
+                fill="x", padx=18, after=self.local_backup_help
+            )
+            self.usb_switches_row.pack(
+                fill="x",
+                padx=18,
+                pady=(10, 14),
+                after=self.usb_options_divider,
+            )
+            self.btn_restore.pack(side="right")
+            self.btn_cleanup.pack(side="right", padx=(0, 10))
+            self.subtitle_label.configure(
+                text="Check a Rekordbox USB, convert unsupported audio, and keep its library paths in sync"
+            )
+            self.mode_help_label.configure(
+                text="Preserves Device Library paths, playlists, cues, beatgrids, and waveforms."
+            )
+            self.btn_scan.configure(text="Scan USB Drive", state="normal")
+            self.btn_convert.configure(text="Convert Planned Tracks")
+            self.table_header_label.configure(text="Planned Conversions")
+            self.card_total.title_label.configure(text="TOTAL TRACKS")
+            self.card_compat.title_label.configure(text="COMPATIBLE")
+            self.card_incompat.title_label.configure(text="NEEDS CONVERSION")
+            self.tree.heading("title", text="Track Title")
+            self.tree.heading("target", text="Converts To")
+            self.lbl_status.configure(text="Ready to scan.")
+
+    def _browse_folder_source(self) -> None:
+        path = filedialog.askdirectory(title="Choose Source Audio Folder")
+        if not path:
+            return
+        source = Path(path)
+        self.folder_source_var.set(str(source))
+        if not self.folder_destination_var.get().strip():
+            self.folder_destination_var.set(
+                str(source.parent / f"{source.name} - Compatible")
+            )
+        if self.folder_summary and not self.is_scanning:
+            self._start_folder_scan()
+
+    def _browse_folder_destination(self) -> None:
+        path = filedialog.askdirectory(title="Choose Destination Folder")
+        if not path:
+            return
+        self.folder_destination_var.set(path)
+        if self.folder_summary and not self.is_scanning:
+            self._start_folder_scan()
+
+    def _folder_setting_changed(self, rescan: bool = True) -> None:
+        normalize = self.folder_policy_var.get() == "Normalize every audio file"
+        self.folder_copy_switch.configure(
+            state="disabled" if normalize else "normal"
+        )
+        if (
+            rescan
+            and self.mode_var.get() == "Audio Folder"
+            and not self.is_converting
+            and (self.folder_summary or self.is_scanning)
+        ):
+            self._start_folder_scan()
 
     def _on_profile_changed(self, choice: str):
         self.lbl_profile_desc.configure(
@@ -908,7 +1188,7 @@ class ModernRekordboxGUI(ctk.CTk):
         if (
             not self.is_converting
             and not self.is_cleanup_running
-            and (self.summary or self.is_scanning)
+            and (self.summary or self.folder_summary or self.is_scanning)
         ):
             self._start_scan()
 
@@ -916,7 +1196,7 @@ class ModernRekordboxGUI(ctk.CTk):
         if (
             not self.is_converting
             and not self.is_cleanup_running
-            and (self.summary or self.is_scanning)
+            and (self.summary or self.folder_summary or self.is_scanning)
         ):
             self._start_scan()
 
@@ -924,7 +1204,7 @@ class ModernRekordboxGUI(ctk.CTk):
         if (
             not self.is_converting
             and not self.is_cleanup_running
-            and (self.summary or self.is_scanning)
+            and (self.summary or self.folder_summary or self.is_scanning)
         ):
             self._start_scan(
                 allow_onelibrary_bridge=bool(
@@ -948,8 +1228,22 @@ class ModernRekordboxGUI(ctk.CTk):
             self.backup_switch,
             self.local_backup_entry,
             self.btn_backup_browse,
+            self.mode_switch,
+            self.folder_source_entry,
+            self.folder_source_button,
+            self.folder_destination_entry,
+            self.folder_destination_button,
+            self.folder_policy_menu,
+            self.folder_recursive_switch,
+            self.folder_copy_switch,
         ):
             widget.configure(state=state)
+        if (
+            enabled
+            and self.mode_var.get() == "Audio Folder"
+            and self.folder_policy_var.get() == "Normalize every audio file"
+        ):
+            self.folder_copy_switch.configure(state="disabled")
         if enabled and self.summary and self.summary.onelibrary_bridge_mode:
             self.del_switch.select()
             self.del_switch.configure(state="disabled")
@@ -959,9 +1253,9 @@ class ModernRekordboxGUI(ctk.CTk):
     def _on_close(self):
         if self.is_converting or self.is_cleanup_running:
             messagebox.showwarning(
-                "USB Operation in Progress",
-                "A USB operation is still running. Keep this window open and do not eject the "
-                "USB until the completion message appears.",
+                "Conversion in Progress",
+                "A conversion or recovery operation is still running. Keep this window open "
+                "until the completion message appears.",
             )
             return
         self.after_cancel(self._ui_poll_id)
@@ -1055,6 +1349,9 @@ class ModernRekordboxGUI(ctk.CTk):
     # ------------------------------------------------------------------ scan
 
     def _start_scan(self, allow_onelibrary_bridge: bool = False):
+        if self.mode_var.get() == "Audio Folder":
+            self._start_folder_scan()
+            return
         usb_path = self._get_selected_path()
         if not usb_path.exists():
             messagebox.showerror("Error", f"Path does not exist: {usb_path}")
@@ -1104,6 +1401,166 @@ class ModernRekordboxGUI(ctk.CTk):
 
         threading.Thread(target=run, daemon=True).start()
 
+    def _start_folder_scan(self) -> None:
+        source_text = self.folder_source_var.get().strip()
+        destination_text = self.folder_destination_var.get().strip()
+        if not source_text or not destination_text:
+            messagebox.showerror(
+                "Choose Source and Destination",
+                "Choose an audio source folder and a separate destination folder before scanning.",
+            )
+            return
+        source = Path(source_text).expanduser().resolve(strict=False)
+        destination = Path(destination_text).expanduser().resolve(strict=False)
+        if not source.is_dir():
+            messagebox.showerror(
+                "Source Folder Not Found", f"Source folder does not exist:\n{source}"
+            )
+            return
+
+        self.scan_generation += 1
+        generation = self.scan_generation
+        profile_type = CompatibilityProfileType(
+            PROFILE_VALUES.get(self.profile_var.get(), self.profile_var.get())
+        )
+        target_format = TargetFormat(self.format_var.get().lower())
+        enforce_16_bit = self.bit_depth_var.get() == "Enforce 16-bit"
+        normalize_all = self.folder_policy_var.get() == "Normalize every audio file"
+        recursive = bool(self.folder_recursive_var.get())
+        copy_compatible = bool(self.folder_copy_compatible_var.get())
+        self.is_scanning = True
+        self.folder_summary = None
+        self.lbl_status.configure(text="Scanning audio files and checking compatibility...")
+        self.tree.delete(*self.tree.get_children())
+        self.btn_scan.configure(state="disabled")
+        self.btn_convert.configure(
+            state="disabled", text="Create Compatible Collection"
+        )
+
+        def run():
+            try:
+                summary = self.folder_engine.scan(
+                    source,
+                    destination,
+                    get_profile(profile_type),
+                    target_format=target_format,
+                    enforce_pcm_16_bit=enforce_16_bit,
+                    recursive=recursive,
+                    normalize_all=normalize_all,
+                    copy_compatible=copy_compatible,
+                )
+            except Exception as exc:
+                self._post_to_ui(self._on_scan_error, str(exc), generation)
+                return
+            self._post_to_ui(
+                self._accept_folder_scan_result,
+                generation,
+                source,
+                destination,
+                summary,
+            )
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _accept_folder_scan_result(
+        self,
+        generation: int,
+        source: Path,
+        destination: Path,
+        summary: FolderScanSummary,
+    ) -> None:
+        if generation != self.scan_generation or self.mode_var.get() != "Audio Folder":
+            return
+        current_source = Path(self.folder_source_var.get()).expanduser().resolve(
+            strict=False
+        )
+        current_destination = Path(
+            self.folder_destination_var.get()
+        ).expanduser().resolve(strict=False)
+        if source != current_source or destination != current_destination:
+            return
+        self.folder_summary = summary
+        self._render_folder_scan()
+
+    def _render_folder_scan(self) -> None:
+        self.is_scanning = False
+        self.btn_scan.configure(state="normal")
+        summary = self.folder_summary
+        if not summary:
+            return
+        for index, task in enumerate(summary.tasks, start=1):
+            audio = task.audio
+            current_spec = (
+                f"{audio.sample_rate / 1000:g} kHz / {audio.sample_depth}-bit"
+            )
+            output = (
+                "Copy unchanged"
+                if task.action == "copy"
+                else (
+                    f"{task.target_format.value.upper()} "
+                    f"{task.target_sample_rate / 1000:g} kHz / "
+                    f"{task.target_sample_depth}-bit"
+                )
+            )
+            self.tree.insert(
+                "",
+                "end",
+                values=(
+                    index,
+                    str(audio.relative_path),
+                    audio.extension.upper(),
+                    current_spec,
+                    output,
+                ),
+                tags=("odd" if index % 2 else "even",),
+            )
+        self.card_total.val_label.configure(text=str(summary.total_files))
+        self.card_compat.val_label.configure(text=str(summary.compatible_files))
+        self.card_incompat.val_label.configure(text=str(summary.conversion_files))
+        count_text = (
+            f"{summary.conversion_files} conversions, "
+            f"{summary.copy_files} unchanged copies"
+        )
+        if summary.unreadable_files:
+            count_text += f", {summary.unreadable_files} unreadable"
+        self.lbl_track_count.configure(text=f"{count_text} of {summary.total_files} files")
+
+        if summary.issues:
+            self.btn_convert.configure(state="disabled")
+            self.lbl_status.configure(
+                text=f"Folder scan found {len(summary.issues)} problem(s); no files were changed."
+            )
+            details = "\n".join(f"- {item}" for item in summary.issues[:6])
+            messagebox.showerror(
+                "Folder Plan Cannot Start",
+                "Resolve these problems and scan again:\n\n" + details,
+            )
+            return
+        if not summary.tasks:
+            self.btn_convert.configure(state="disabled")
+            self.lbl_status.configure(
+                text="Scan complete: no output files are needed for the selected policy."
+            )
+            return
+        self.btn_convert.configure(
+            state="normal", text="Create Compatible Collection"
+        )
+        required_mib = (summary.required_space_bytes + 1024 * 1024 - 1) // (
+            1024 * 1024
+        )
+        self.lbl_status.configure(
+            text=(
+                f"Ready: {summary.conversion_files} files will be converted and "
+                f"{summary.copy_files} copied unchanged; about {required_mib} MiB required."
+            )
+        )
+        if summary.warnings and self.show_guidance_var.get():
+            details = "\n".join(f"- {item}" for item in summary.warnings[:6])
+            messagebox.showwarning(
+                "Some Files Were Skipped",
+                f"{len(summary.warnings)} file(s) were skipped:\n\n{details}",
+            )
+
     def _accept_scan_result(self, generation: int, usb_path: Path, summary: ScanSummary):
         if generation != self.scan_generation or usb_path != self._get_selected_path():
             return
@@ -1117,7 +1574,12 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_scan.configure(state="normal")
         self.btn_cleanup.configure(state="normal")
         self.lbl_status.configure(text="Scan failed.")
-        messagebox.showerror("Scan Failed", f"Could not read the Rekordbox database:\n{msg}")
+        context = (
+            "Could not scan the audio folder"
+            if self.mode_var.get() == "Audio Folder"
+            else "Could not read the Rekordbox database"
+        )
+        messagebox.showerror("Scan Failed", f"{context}:\n{msg}")
 
     def _render_scan(self):
         self.is_scanning = False
@@ -1324,6 +1786,9 @@ class ModernRekordboxGUI(ctk.CTk):
         self.update_idletasks()
 
     def _start_conversion(self):
+        if self.mode_var.get() == "Audio Folder":
+            self._start_folder_conversion()
+            return
         if not self.summary or not (
             self.summary.tasks
             or self.summary.analysis_repairs
@@ -1512,6 +1977,141 @@ class ModernRekordboxGUI(ctk.CTk):
             )
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _start_folder_conversion(self) -> None:
+        summary = self.folder_summary
+        if not summary or not summary.tasks or summary.issues:
+            return
+        current_source = Path(self.folder_source_var.get()).expanduser().resolve(
+            strict=False
+        )
+        current_destination = Path(
+            self.folder_destination_var.get()
+        ).expanduser().resolve(strict=False)
+        if (
+            current_source != summary.source_root
+            or current_destination != summary.destination_root
+        ):
+            messagebox.showerror(
+                "Scan Required",
+                "The source or destination folder changed after scanning. Scan the folders "
+                "again before creating output.",
+            )
+            return
+        if summary.conversion_files:
+            tools_ok, tools_message = self.folder_engine.audio_converter.check_tools()
+            if not tools_ok:
+                messagebox.showerror("FFmpeg Not Found", tools_message)
+                return
+        confirm = messagebox.askyesno(
+            "Create Compatible Collection",
+            f"Create {len(summary.tasks)} output file(s) in:\n"
+            f"{summary.destination_root}\n\n"
+            f"{summary.conversion_files} file(s) will be converted and "
+            f"{summary.copy_files} compatible file(s) copied unchanged. "
+            "The source folder will not be modified.\n\n"
+            f"{FOLDER_MODE_HELP}",
+            default=messagebox.NO,
+        )
+        if not confirm:
+            return
+        self.is_converting = True
+        self.btn_scan.configure(state="disabled")
+        self.btn_convert.configure(
+            state="disabled", text=f"Processing 0 of {len(summary.tasks)}..."
+        )
+        self._set_conversion_controls(False)
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(0)
+        self.lbl_status.configure(
+            text="Creating the compatible collection. Source files will remain unchanged."
+        )
+        self.update_idletasks()
+        threads = int(self.threads_slider.get())
+
+        def run():
+            try:
+                result = self.folder_engine.execute(
+                    summary,
+                    threads=threads,
+                    progress_callback=lambda task, current, total: self._post_to_ui(
+                        self._update_folder_progress,
+                        task.action,
+                        str(task.audio.relative_path),
+                        current,
+                        total,
+                    ),
+                )
+            except Exception as exc:
+                self._post_to_ui(self._on_conversion_error, str(exc))
+                return
+            self._post_to_ui(self._on_folder_finish, result, summary)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _update_folder_progress(
+        self, action: str, relative_path: str, current: int, total: int
+    ) -> None:
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(current / total if total else 0)
+        self.btn_convert.configure(text=f"Processing {current} of {total}...")
+        verb = "Copying" if action == "copy" else "Converting"
+        self.lbl_status.configure(
+            text=(
+                f"{verb} files — {current} of {total} complete. "
+                f"Latest: {relative_path[:55]}."
+            )
+        )
+
+    def _on_folder_finish(
+        self, result: dict, conversion_summary: FolderScanSummary
+    ) -> None:
+        self.is_converting = False
+        self._set_conversion_controls(True)
+        self.btn_scan.configure(state="normal")
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(1.0 if result.get("success") else 0)
+        if result.get("success"):
+            self.folder_summary = None
+            self.btn_convert.configure(
+                state="disabled", text="Create Compatible Collection"
+            )
+            self.lbl_status.configure(
+                text=(
+                    f"Complete: {result.get('converted', 0)} converted and "
+                    f"{result.get('copied', 0)} copied unchanged. Source files were not modified."
+                )
+            )
+            messagebox.showinfo(
+                "Compatible Collection Created",
+                f"Converted: {result.get('converted', 0)}\n"
+                f"Copied unchanged: {result.get('copied', 0)}\n\n"
+                f"Destination:\n{conversion_summary.destination_root}\n\n"
+                "This folder contains audio files only. Import it into Rekordbox if you "
+                "need playlists, beatgrids, cues, or waveform analysis.",
+            )
+            return
+        errors = result.get("errors") or []
+        detail = f"\n\nFirst error:\n{errors[0]}" if errors else ""
+        self.btn_convert.configure(
+            state="normal", text="Create Compatible Collection"
+        )
+        self.lbl_status.configure(
+            text=(
+                f"Folder conversion finished with errors: "
+                f"{result.get('completed', 0)} completed, {result.get('failed', 0)} failed."
+            )
+        )
+        messagebox.showwarning(
+            "Folder Conversion Incomplete",
+            f"Completed: {result.get('completed', 0)}\n"
+            f"Failed: {result.get('failed', 0)}{detail}\n\n"
+            "Existing output files will not be overwritten. Choose an empty destination "
+            "or remove the completed output after reviewing it, then scan again.",
+        )
 
     def _update_phase(
         self, phase: str, current: int, total: int, detail: str

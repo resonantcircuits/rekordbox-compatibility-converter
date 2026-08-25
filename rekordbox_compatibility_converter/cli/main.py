@@ -13,6 +13,7 @@ from rich.table import Table
 from ..core.audio_converter import AudioConverter
 from ..core.dlp_manager import ONELIBRARY_REBUILD_REQUIRED_MESSAGE
 from ..core.engine import DEFAULT_CONVERSION_THREADS, ConversionEngine
+from ..core.folder_engine import FolderConversionEngine
 from ..core.models import CompatibilityProfileType, TargetFormat
 from ..core.profiles import PROFILES, get_profile
 from ..core.usb_detector import USBDetector
@@ -604,6 +605,187 @@ def convert(
 
     if not result.get("success"):
         raise click.exceptions.Exit(1)
+
+
+@cli.command("folder")
+@click.argument(
+    "source",
+    type=click.Path(path_type=Path, exists=True, file_okay=False, resolve_path=True),
+)
+@click.option(
+    "--output",
+    "destination",
+    required=True,
+    type=click.Path(path_type=Path, file_okay=False, resolve_path=True),
+    help="Separate destination folder for compatible copies.",
+)
+@click.option(
+    "--profile",
+    "-p",
+    type=click.Choice([p.value for p in CompatibilityProfileType], case_sensitive=False),
+    default=CompatibilityProfileType.STANDARD.value,
+    show_default=True,
+    help="Target CDJ hardware profile.",
+)
+@click.option(
+    "--format",
+    "-f",
+    "target_format",
+    type=click.Choice([item.value for item in TargetFormat], case_sensitive=False),
+    default=TargetFormat.AIFF.value,
+    show_default=True,
+    help="Format used for files that require conversion.",
+)
+@click.option(
+    "--normalize-all",
+    is_flag=True,
+    help="Convert every discovered file to the selected output format.",
+)
+@click.option(
+    "--copy-compatible/--converted-only",
+    default=True,
+    show_default=True,
+    help="Copy already-compatible files so the destination is a complete collection.",
+)
+@click.option(
+    "--recursive/--no-recursive",
+    default=True,
+    show_default=True,
+    help="Include audio in subfolders and preserve their relative paths.",
+)
+@click.option(
+    "--enforce-16-bit",
+    is_flag=True,
+    help="Convert lossless audio above 16-bit to 16-bit output.",
+)
+@click.option(
+    "--threads",
+    "-t",
+    type=click.IntRange(1, 32),
+    default=DEFAULT_CONVERSION_THREADS,
+    show_default=True,
+    help="Number of parallel conversion/copy workers.",
+)
+@click.option("--yes", "-y", is_flag=True, help="Start without confirmation.")
+def convert_folder(
+    source: Path,
+    destination: Path,
+    profile: str,
+    target_format: str,
+    normalize_all: bool,
+    copy_compatible: bool,
+    recursive: bool,
+    enforce_16_bit: bool,
+    threads: int,
+    yes: bool,
+):
+    """Create a CDJ-compatible audio collection from an ordinary folder."""
+    engine = FolderConversionEngine()
+    tools_ok, tools_message = engine.audio_converter.check_tools()
+    if not tools_ok:
+        raise click.ClickException(tools_message)
+    hardware_profile = get_profile(CompatibilityProfileType(profile))
+    summary = engine.scan(
+        source,
+        destination,
+        hardware_profile,
+        target_format=TargetFormat(target_format.lower()),
+        enforce_pcm_16_bit=enforce_16_bit,
+        recursive=recursive,
+        normalize_all=normalize_all,
+        copy_compatible=copy_compatible,
+    )
+    if summary.issues:
+        details = "\n".join(f"- {escape(issue)}" for issue in summary.issues[:10])
+        raise click.ClickException(
+            "Folder conversion cannot start until these problems are resolved:\n"
+            + details
+        )
+
+    console.print(
+        Panel(
+            f"[bold]Source:[/bold] {escape(str(summary.source_root))}\n"
+            f"[bold]Destination:[/bold] {escape(str(summary.destination_root))}\n"
+            f"[bold]Profile:[/bold] {escape(hardware_profile.name)}\n"
+            f"[bold]Audio files found:[/bold] {summary.total_files}\n"
+            f"[bold]Files to convert:[/bold] {summary.conversion_files}\n"
+            f"[bold]Compatible files to copy:[/bold] {summary.copy_files}\n"
+            f"[bold]Policy:[/bold] "
+            f"{'Normalize every file' if normalize_all else 'Convert only incompatible files'}",
+            title="Audio Folder Conversion",
+            border_style="cyan",
+        )
+    )
+    if summary.warnings:
+        console.print(
+            Panel(
+                "\n".join(escape(item) for item in summary.warnings[:10]),
+                title="Skipped Files",
+                border_style="yellow",
+            )
+        )
+    if not summary.tasks:
+        console.print("[green]No output files are needed for the selected policy.[/green]")
+        return
+    if not yes and not click.confirm(
+        "Create the compatible collection without modifying the source folder?",
+        default=True,
+    ):
+        console.print("[yellow]Folder conversion canceled.[/yellow]")
+        return
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+        TimeRemainingColumn(),
+        console=console,
+    ) as progress:
+        progress_task = progress.add_task(
+            "[cyan]Creating compatible collection...", total=len(summary.tasks)
+        )
+
+        def on_progress(task, current, total):
+            progress.update(
+                progress_task,
+                completed=current,
+                total=total,
+                description=(
+                    f"[cyan]{task.action.title()}: "
+                    f"[bold]{escape(task.audio.filename)}[/bold]"
+                ),
+            )
+
+        result = engine.execute(
+            summary,
+            threads=threads,
+            progress_callback=on_progress,
+        )
+
+    if not result["success"]:
+        first_error = result["errors"][0] if result.get("errors") else "Unknown error"
+        console.print(
+            Panel(
+                f"[bold red]Folder conversion did not complete.[/bold red]\n"
+                f"Completed: {result['completed']}\n"
+                f"Failed: {result['failed']}\n"
+                f"First error: {escape(str(first_error))}",
+                border_style="red",
+            )
+        )
+        raise click.exceptions.Exit(1)
+    console.print(
+        Panel(
+            f"[bold green]Compatible collection created.[/bold green]\n"
+            f"Converted: {result['converted']}\n"
+            f"Copied unchanged: {result['copied']}\n"
+            f"Destination: {escape(result['destination'])}\n\n"
+            "This output contains audio files only. Import it into Rekordbox to create "
+            "playlists, beatgrids, cues, and waveform analysis.",
+            border_style="green",
+        )
+    )
 
 
 @cli.command("restore-local-backup")

@@ -95,6 +95,11 @@ class AudioConverter:
                 "duration": float(info.get("format", {}).get("duration", 0)),
                 "size": int(info.get("format", {}).get("size", file_path.stat().st_size)),
                 "tags": info.get("format", {}).get("tags", {}),
+                "has_artwork": any(
+                    stream.get("codec_type") == "video"
+                    and bool(stream.get("disposition", {}).get("attached_pic"))
+                    for stream in info.get("streams", [])
+                ),
             }
         except Exception as exc:
             return {

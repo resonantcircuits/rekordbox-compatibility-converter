@@ -23,6 +23,75 @@ def test_convert_help_exposes_whole_library_16_bit_policy():
     assert "otherwise-compatible WAV/AIFF" in result.output
 
 
+def test_folder_help_exposes_safe_standalone_workflow():
+    result = CliRunner().invoke(cli, ["folder", "--help"])
+
+    assert result.exit_code == 0
+    assert "--output" in result.output
+    assert "--normalize-all" in result.output
+    assert "--copy-compatible" in result.output
+    assert "--converted-only" in result.output
+
+
+def test_folder_command_creates_audio_only_collection(tmp_path, monkeypatch):
+    source = tmp_path / "Source"
+    destination = tmp_path / "Destination"
+    source.mkdir()
+    task = SimpleNamespace(action="convert", audio=SimpleNamespace(filename="track.flac"))
+    summary = SimpleNamespace(
+        source_root=source.resolve(),
+        destination_root=destination.resolve(),
+        total_files=1,
+        conversion_files=1,
+        copy_files=0,
+        issues=[],
+        warnings=[],
+        tasks=[task],
+    )
+    calls = []
+
+    class FakeFolderEngine:
+        audio_converter = SimpleNamespace(check_tools=lambda: (True, "available"))
+
+        def scan(self, *args, **kwargs):
+            calls.append((args, kwargs))
+            return summary
+
+        def execute(self, received_summary, threads, progress_callback):
+            assert received_summary is summary
+            assert threads == 3
+            progress_callback(task, 1, 1)
+            return {
+                "success": True,
+                "completed": 1,
+                "converted": 1,
+                "copied": 0,
+                "failed": 0,
+                "errors": [],
+                "destination": str(destination),
+            }
+
+    monkeypatch.setattr(main, "FolderConversionEngine", FakeFolderEngine)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "folder",
+            str(source),
+            "--output",
+            str(destination),
+            "--threads",
+            "3",
+            "--yes",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Compatible collection created" in result.output
+    assert "audio files only" in result.output
+    assert calls[0][1]["copy_compatible"] is True
+
+
 def test_scan_device_library_plus_returns_nonzero(tmp_path):
     database = tmp_path / "PIONEER" / "DeviceLibraryPlus" / "exportLibrary.db"
     database.parent.mkdir(parents=True)

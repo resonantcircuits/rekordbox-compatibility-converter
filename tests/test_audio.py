@@ -45,6 +45,7 @@ def test_audio_converter_probe(sample_flac: Path):
     assert info.get("sample_rate") == 44100
     assert info.get("channels") == 1 or info.get("channels") == 2
     assert info.get("size") > 0
+    assert info.get("has_artwork") is False
 
 
 def test_convert_flac_to_aiff(sample_flac: Path, tmp_path: Path):

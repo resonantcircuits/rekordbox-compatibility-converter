@@ -3,7 +3,7 @@
 [![Python Version](https://img.shields.io/badge/python-3.9+-blue.svg)](https://python.org)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-A desktop app for checking a Rekordbox USB and converting tracks that older CDJ and XDJ players cannot read.
+A desktop app for checking a Rekordbox USB or an ordinary audio folder and creating files that older CDJ and XDJ players can read.
 
 [Download the latest desktop release](https://github.com/resonantcircuits/rekordbox-compatibility-converter/releases/latest)
 
@@ -24,6 +24,8 @@ Releases are available for Apple Silicon Macs, Intel Macs, and 64-bit Windows. F
 
 The app updates the traditional Device Library (`export.pdb`) and its referenced waveform, beatgrid, and cue analysis files. USBs for newer OneLibrary devices are supported through a two-step workflow: after conversion, Rekordbox's **Convert from Device Library** command rebuilds OneLibrary from the updated Device Library. The app guides you through this extra step; it does not modify `exportLibrary.db` directly.
 
+Switch to **Audio Folder** to create a separate compatible collection without a Rekordbox export. Incompatible files are converted, compatible files can be copied unchanged, subfolders are preserved, and the source is never modified. Folder mode creates audio files only; import the result into Rekordbox if you need playlists, beatgrids, cues, or waveform analysis.
+
 ## What it handles
 
 - FLAC, ALAC, high-sample-rate audio, and optional 16-bit normalization
@@ -33,6 +35,7 @@ The app updates the traditional Device Library (`export.pdb`) and its referenced
 - Verified local recovery archives for originals and Rekordbox metadata
 - Existing-target checks, path containment, available-space checks, and rollback
 - AppleDouble (`._*`) and `.DS_Store` cleanup
+- Safe standalone folder conversion with separate source and destination trees
 
 Hardware support differs by profile and exact player model. See [Compatibility profiles](docs/compatibility.md) before preparing a USB for unfamiliar equipment.
 

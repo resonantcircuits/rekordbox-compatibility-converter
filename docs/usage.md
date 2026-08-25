@@ -8,7 +8,7 @@ Packaged releases open directly as a desktop application. From a source checkout
 uv run rbconvert-gui
 ```
 
-The main workflow is:
+Select **Rekordbox USB** for the library-aware workflow:
 
 1. Select a detected Rekordbox USB.
 2. Choose a compatibility profile and optional 16-bit policy.
@@ -22,7 +22,37 @@ The profile information button lists the covered hardware. The **Help** menu kee
 
 Conversion defaults to two workers. Increasing the count can make USB flash drives slower because reads and writes compete on the same device.
 
+### Audio Folder mode
+
+Select **Audio Folder** to work without a Rekordbox export:
+
+1. Choose the source audio folder.
+2. Choose a separate destination folder. The suggested destination is next to the source.
+3. Leave **Include subfolders** enabled to preserve the relative directory structure.
+4. Choose **Convert only incompatible files** to preserve quality. Compatible files are copied byte-for-byte by default so the destination is a complete collection.
+5. Choose **Normalize every audio file** only when every output should use the selected AIFF, WAV, or MP3 format.
+6. Scan, review the output plan, and create the collection.
+
+Folder mode discovers AIFF, WAV, MP3, FLAC, and M4A/MP4 files containing AAC or ALAC. Other file types are left out of the plan.
+
+The source folder is never modified or overwritten. Existing destination files and output-name collisions stop the plan before conversion. Copies are SHA-256 verified, and converted files are decoded and checked before their final names are committed.
+
+Folder mode does not create a Device Library, playlists, beatgrids, cues, or waveform analysis. Import the destination into Rekordbox and export it normally when those features are required.
+
 ## Command-line interface
+
+Create a standalone compatible collection:
+
+```bash
+uv run rbconvert folder "/path/to/Source Music" --output "/path/to/Compatible Music"
+```
+
+Normalize every discovered file or emit only converted files:
+
+```bash
+uv run rbconvert folder SOURCE --output DESTINATION --profile maximum --normalize-all --format aiff
+uv run rbconvert folder SOURCE --output DESTINATION --converted-only
+```
 
 Scan an explicitly selected USB:
 

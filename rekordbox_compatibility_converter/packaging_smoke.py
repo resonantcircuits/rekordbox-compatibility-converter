@@ -7,7 +7,9 @@ import wave
 from pathlib import Path
 
 from .core.audio_converter import AudioConverter
-from .core.models import TargetFormat
+from .core.folder_engine import FolderConversionEngine
+from .core.models import CompatibilityProfileType, TargetFormat
+from .core.profiles import get_profile
 
 
 def verify_ffmpeg_distribution_metadata(
@@ -186,3 +188,27 @@ def run_frozen_conversion_smoke_test() -> None:
                         f"Packaged {target_format.value} output has unexpected "
                         f"{field}: {probe.get(field)!r}"
                     )
+
+        folder_source = Path(temp_dir) / "folder-source"
+        folder_source.mkdir()
+        folder_input = folder_source / "nested" / "input.wav"
+        folder_input.parent.mkdir()
+        _write_silent_wav(folder_input)
+        folder_destination = Path(temp_dir) / "folder-destination"
+        folder_engine = FolderConversionEngine(audio_converter=converter)
+        folder_summary = folder_engine.scan(
+            folder_source,
+            folder_destination,
+            get_profile(CompatibilityProfileType.STANDARD),
+            target_format=TargetFormat.AIFF,
+            normalize_all=True,
+        )
+        if folder_summary.issues or len(folder_summary.tasks) != 1:
+            raise RuntimeError(
+                "Packaged standalone folder scan failed: "
+                + "; ".join(folder_summary.issues)
+            )
+        folder_result = folder_engine.execute(folder_summary, threads=1)
+        folder_output = folder_destination / "nested" / "input.aiff"
+        if not folder_result.get("success") or not folder_output.is_file():
+            raise RuntimeError("Packaged standalone folder conversion failed")

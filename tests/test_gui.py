@@ -11,6 +11,12 @@ from rekordbox_compatibility_converter.gui import app
 from rekordbox_compatibility_converter.gui import modern_app
 from rekordbox_compatibility_converter.gui.modern_app import ModernRekordboxGUI
 from rekordbox_compatibility_converter.core.models import OriginalCleanupPlan
+from rekordbox_compatibility_converter.core.folder_engine import (
+    FolderAudioFile,
+    FolderConversionTask,
+    FolderScanSummary,
+)
+from rekordbox_compatibility_converter.core.models import TargetFormat
 
 
 class _FakeWidget:
@@ -41,6 +47,14 @@ class _FakeVar:
 
     def set(self, value):
         self.value = value
+
+
+class _FakeTree:
+    def __init__(self):
+        self.rows = []
+
+    def insert(self, parent, position, **kwargs):
+        self.rows.append((parent, position, kwargs))
 
 
 def _fake_modern_app(launches, threading_smokes=None):
@@ -181,6 +195,17 @@ def test_help_text_keeps_compatibility_and_onelibrary_workflow_accessible():
     assert "Convert from Device Library" in modern_app.WORKFLOW_HELP
 
 
+def test_audio_folder_mode_clearly_excludes_rekordbox_library_data():
+    assert modern_app.WORKFLOW_MODES == ("Rekordbox USB", "Audio Folder")
+    assert "Audio files only" in modern_app.FOLDER_MODE_HELP
+    assert "playlists" in modern_app.FOLDER_MODE_HELP
+    assert "beatgrids" in modern_app.FOLDER_MODE_HELP
+    assert "waveform analysis" in modern_app.FOLDER_MODE_HELP
+    assert "Source files are never modified" in modern_app.FOLDER_WORKFLOW_HELP
+    assert "Supported inputs are AIFF, WAV, MP3, FLAC" in modern_app.FOLDER_WORKFLOW_HELP
+    assert "does not create a Rekordbox Device Library" in modern_app.FOLDER_WORKFLOW_HELP
+
+
 def test_track_table_reserves_space_for_complete_target_specification():
     columns = {
         column_id: options
@@ -283,6 +308,80 @@ def test_required_backup_folder_prompt_explains_location_and_recovery(
     assert prompts[0][0] == "Recovery Folder Required"
     assert "on this computer, not a folder on the USB" in prompts[0][1]
     assert "restore the USB later" in prompts[0][1]
+
+
+def test_folder_scan_renders_conversions_and_unchanged_copies(tmp_path):
+    source = tmp_path / "Source"
+    destination = tmp_path / "Destination"
+    convert_audio = FolderAudioFile(
+        source_path=source / "convert.flac",
+        relative_path=Path("convert.flac"),
+        sample_rate=44100,
+        sample_depth=24,
+        channels=2,
+        codec_name="flac",
+        duration=1,
+        file_size=100,
+    )
+    copy_audio = FolderAudioFile(
+        source_path=source / "ready.mp3",
+        relative_path=Path("ready.mp3"),
+        sample_rate=44100,
+        sample_depth=16,
+        channels=2,
+        codec_name="mp3",
+        duration=1,
+        file_size=100,
+    )
+    tasks = [
+        FolderConversionTask(
+            audio=convert_audio,
+            target_path=destination / "convert.aiff",
+            action="convert",
+            target_format=TargetFormat.AIFF,
+            target_sample_rate=44100,
+            target_sample_depth=24,
+        ),
+        FolderConversionTask(
+            audio=copy_audio,
+            target_path=destination / "ready.mp3",
+            action="copy",
+            target_format=TargetFormat.AIFF,
+            target_sample_rate=44100,
+            target_sample_depth=16,
+        ),
+    ]
+    summary = FolderScanSummary(
+        source_root=source,
+        destination_root=destination,
+        total_files=2,
+        compatible_files=1,
+        conversion_files=1,
+        copy_files=1,
+        tasks=tasks,
+        required_space_bytes=1024 * 1024,
+    )
+    gui = SimpleNamespace(
+        is_scanning=True,
+        folder_summary=summary,
+        btn_scan=_FakeWidget(),
+        btn_convert=_FakeWidget(),
+        tree=_FakeTree(),
+        card_total=SimpleNamespace(val_label=_FakeWidget()),
+        card_compat=SimpleNamespace(val_label=_FakeWidget()),
+        card_incompat=SimpleNamespace(val_label=_FakeWidget()),
+        lbl_track_count=_FakeWidget(),
+        lbl_status=_FakeWidget(),
+        show_guidance_var=_FakeVar(False),
+    )
+
+    ModernRekordboxGUI._render_folder_scan(gui)
+
+    assert gui.btn_convert.config["state"] == "normal"
+    assert gui.tree.rows[0][2]["values"][-1] == "AIFF 44.1 kHz / 24-bit"
+    assert gui.tree.rows[1][2]["values"][-1] == "Copy unchanged"
+    assert "1 conversions, 1 unchanged copies" in gui.lbl_track_count.config["text"]
+    assert "about 1 MiB required" in gui.lbl_status.config["text"]
 
 
 def test_conversion_progress_shows_track_count_and_latest_file():
