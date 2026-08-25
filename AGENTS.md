@@ -109,6 +109,10 @@ rekordbox_compatibility_converter/
   - `user.name = "Resonant Circuits"`
   - `user.email = "resonantcircuits@pm.me"`
 - **Push Policy**: **NEVER push to remote without explicit user confirmation.** Always ask or wait for the user to review local changes first.
+- **Release Tags**: Before creating or moving a release tag, update the version in
+  `pyproject.toml`, refresh `uv.lock` with `uv lock`, commit both files, and run the
+  same tag/version assertion used by CI. Never create or push `vX.Y.Z` unless the
+  committed package version is exactly `X.Y.Z`.
 
 ---
 

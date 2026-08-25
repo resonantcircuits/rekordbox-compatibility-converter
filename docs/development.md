@@ -35,12 +35,21 @@ Manual runs upload test artifacts for 14 days but do not publish a release. Each
 
 ## Publishing a release
 
-The project version and tag must match exactly. For version `0.3.0`, use tag `v0.3.0`:
+The committed project version, lockfile, and tag must match exactly. Before creating
+the tag:
 
 ```bash
-git tag -a v0.3.0 -m "Release v0.3.0"
-git push origin v0.3.0
+uv lock
+RELEASE_TAG=v0.3.1 uv run --frozen --extra dev python -c "import os, tomllib; version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; expected = 'v' + version; actual = os.environ['RELEASE_TAG']; assert actual == expected, 'tag %r does not match package version %s' % (actual, expected)"
+git add pyproject.toml uv.lock
+git commit -m "Prepare v0.3.1 release"
+git tag -a v0.3.1 -m "Release v0.3.1"
+git push origin main v0.3.1
 ```
+
+Replace `0.3.1` with the intended release version in all commands. Create the tag
+only after the version commit exists; verify the tag points to that commit before
+pushing it.
 
 The tag workflow runs tests, builds all three desktop targets, publishes one shared corresponding-source archive, creates `SHA256SUMS.txt`, and publishes a GitHub Release with generated notes. The first build for a new FFmpeg cache key compiles from source; later matching runs restore the compact cache.
 
