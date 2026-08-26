@@ -15,6 +15,18 @@ def test_scan_missing_database_returns_nonzero(tmp_path):
     assert "export.pdb" in result.output
 
 
+def test_scan_malformed_database_returns_friendly_error(tmp_path):
+    database = tmp_path / "PIONEER" / "rekordbox" / "export.pdb"
+    database.parent.mkdir(parents=True)
+    database.write_bytes(b"corrupt")
+
+    result = CliRunner().invoke(cli, ["scan", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "Failed to parse Rekordbox Device Library" in result.output
+    assert result.exception is not None
+
+
 def test_convert_help_exposes_whole_library_16_bit_policy():
     result = CliRunner().invoke(cli, ["convert", "--help"])
 
@@ -140,6 +152,42 @@ def test_scan_reports_compatible_tracks_with_stale_waveform_paths(
     assert "Test Track" in result.output
     assert "stored waveform paths need repair" in result.output
     assert "All tracks are compatible with the selected profile" not in result.output
+
+
+def test_convert_cleans_dotfiles_when_no_audio_conversion_is_needed(
+    tmp_path, monkeypatch
+):
+    cleaned = []
+    summary = SimpleNamespace(
+        has_export_pdb=True,
+        has_dlp=False,
+        onelibrary_bridge_mode=False,
+        incompatible_tracks=0,
+        analysis_repairs=[],
+        bitrate_repairs=[],
+        tasks=[],
+    )
+
+    class FakeEngine:
+        def scan(self, **_kwargs):
+            return summary
+
+        def clean_dotfiles(self, usb_root):
+            cleaned.append(usb_root)
+            return 2
+
+    monkeypatch.setattr(main, "ConversionEngine", FakeEngine)
+    monkeypatch.setattr(
+        main,
+        "AudioConverter",
+        lambda: SimpleNamespace(check_tools=lambda: (True, "available")),
+    )
+
+    result = CliRunner().invoke(cli, ["convert", str(tmp_path), "--yes"])
+
+    assert result.exit_code == 0, result.output
+    assert cleaned == [tmp_path.resolve()]
+    assert "Cleaned 2 macOS ghost file(s)" in result.output
 
 
 def test_cleanup_originals_cli_runs_verified_plan(tmp_path, monkeypatch):

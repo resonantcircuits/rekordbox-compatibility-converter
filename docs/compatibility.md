@@ -49,6 +49,7 @@ The converter:
 - Updates `PPTH` paths in referenced `.DAT`, `.EXT`, and `.2EX` analysis files.
 - Writes converted output under a unique temporary name, makes source decode errors fatal, verifies codec/rate/depth and source-to-output duration, and commits the audio and metadata changes before removing an original.
 - Verifies audio duration, extensions, format codes, metadata, and analysis references after conversion.
+- Preserves mono/stereo channel layouts and downmixes multichannel sources to stereo.
 - Rejects malformed databases, missing sidecars, target collisions, and paths outside the selected USB before conversion.
 
 AIFF is the default because uncompressed PCM preserves sample timing and avoids beatgrid drift caused by lossy transcoding.

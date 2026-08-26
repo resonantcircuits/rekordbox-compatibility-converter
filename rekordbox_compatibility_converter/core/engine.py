@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -399,29 +400,47 @@ class ConversionEngine:
 
             rel_usb_path = track.file_path.lstrip("/")
             source_abs = usb_root / rel_usb_path
-            if (
-                ext in {"m4a", "mp4"}
-                and self._is_within(usb_root, source_abs)
-                and source_abs.is_file()
-            ):
-                probe = self.audio_converter.probe(source_abs)
-                if not probe.get("probe_error"):
-                    track.codec_name = str(probe.get("codec_name") or "")
-                    track.channels = int(probe.get("channels") or 2)
+            source_is_safe = self._is_within(usb_root, source_abs)
+            source_probe: Dict = {}
+            evaluated_track = track
+            if source_is_safe and source_abs.is_file():
+                source_probe = self.audio_converter.probe(source_abs)
+                if not source_probe.get("probe_error"):
+                    track.codec_name = str(source_probe.get("codec_name") or "")
+                    track.channels = int(source_probe.get("channels") or 2)
+                    evaluated_track = replace(
+                        track,
+                        sample_rate=int(source_probe.get("sample_rate") or track.sample_rate),
+                        sample_depth=int(
+                            source_probe.get("bits_per_sample") or track.sample_depth
+                        ),
+                    )
 
-            check = profile.evaluate(track)
-            lossless_depth_format = track.extension in {
+            check = profile.evaluate(evaluated_track)
+            if not source_is_safe:
+                check.is_compatible = False
+                check.reasons.append("The audio path resolves outside the selected USB.")
+            elif not source_abs.is_file():
+                check.is_compatible = False
+                check.reasons.append("The referenced audio file is missing.")
+            elif source_probe.get("probe_error") or not source_probe:
+                check.is_compatible = False
+                check.reasons.append(
+                    "The referenced audio file could not be inspected: "
+                    f"{source_probe.get('probe_error') or 'no audio stream'}"
+                )
+            lossless_depth_format = evaluated_track.extension in {
                 "aif",
                 "aiff",
                 "wav",
                 "wave",
                 "flac",
                 "fla",
-            } or track.codec_name.lower() == "alac"
+            } or evaluated_track.codec_name.lower() == "alac"
             if (
                 enforce_pcm_16_bit
                 and lossless_depth_format
-                and track.sample_depth != 16
+                and evaluated_track.sample_depth != 16
             ):
                 check.is_compatible = False
                 check.reasons.append(
@@ -434,7 +453,7 @@ class ConversionEngine:
                     and self._is_within(usb_root, source_abs)
                     and source_abs.is_file()
                 ):
-                    probe = self.audio_converter.probe(source_abs)
+                    probe = source_probe
                     if not probe.get("probe_error"):
                         expected_bitrate = self._probed_device_sql_bitrate(probe)
                         stored_kilobits = device_sql_bitrate_kbps(track.bitrate)
@@ -1572,6 +1591,13 @@ class ConversionEngine:
                 task.status = "failed"
                 task.error = f"Staged output failed verification: {task.output_probe['probe_error']}"
                 stage.unlink(missing_ok=True)
+                if local_session:
+                    try:
+                        local_session.restore_task_after_failure(task)
+                    except Exception as restore_exc:
+                        task.warnings.append(
+                            f"Could not restore task files from local backup: {restore_exc}"
+                        )
                 return False
             return True
 

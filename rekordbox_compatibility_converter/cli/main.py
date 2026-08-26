@@ -121,13 +121,16 @@ def scan(
     )
 
     with console.status("[bold green]Reading export.pdb database...[/bold green]"):
-        summary = engine.scan(
-            usb_root=usb_root,
-            profile=hw_profile,
-            forced_target_format=TargetFormat(target_format.lower()),
-            enforce_pcm_16_bit=enforce_16_bit,
-            allow_onelibrary_bridge=experimental_onelibrary_bridge,
-        )
+        try:
+            summary = engine.scan(
+                usb_root=usb_root,
+                profile=hw_profile,
+                forced_target_format=TargetFormat(target_format.lower()),
+                enforce_pcm_16_bit=enforce_16_bit,
+                allow_onelibrary_bridge=experimental_onelibrary_bridge,
+            )
+        except Exception as exc:
+            raise click.ClickException(f"Failed to parse Rekordbox Device Library: {exc}") from exc
 
     if not summary.has_export_pdb:
         if summary.has_dlp:
@@ -358,13 +361,16 @@ def convert(
         console.print("Please install ffmpeg (e.g. `brew install ffmpeg` on macOS or download from ffmpeg.org).")
         raise click.Abort()
 
-    summary = engine.scan(
-        usb_root=usb_root,
-        profile=hw_profile,
-        forced_target_format=TargetFormat(target_format.lower()),
-        enforce_pcm_16_bit=enforce_16_bit,
-        allow_onelibrary_bridge=experimental_onelibrary_bridge,
-    )
+    try:
+        summary = engine.scan(
+            usb_root=usb_root,
+            profile=hw_profile,
+            forced_target_format=TargetFormat(target_format.lower()),
+            enforce_pcm_16_bit=enforce_16_bit,
+            allow_onelibrary_bridge=experimental_onelibrary_bridge,
+        )
+    except Exception as exc:
+        raise click.ClickException(f"Failed to parse Rekordbox Device Library: {exc}") from exc
 
     if not summary.has_export_pdb:
         if summary.has_dlp:
@@ -429,7 +435,22 @@ def convert(
         and not summary.analysis_repairs
         and not summary.bitrate_repairs
     ):
-        console.print("\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n")
+        if clean_dotfiles:
+            if not yes and not click.confirm(
+                "All tracks are compatible. Clean macOS ghost files from this USB?",
+                default=True,
+            ):
+                console.print("[yellow]Cleanup canceled; no files were changed.[/yellow]")
+                return
+            cleaned = engine.clean_dotfiles(usb_root)
+            console.print(
+                "\n[bold green]All tracks are already compatible.[/bold green]\n"
+                f"Cleaned {cleaned} macOS ghost file(s).\n"
+            )
+        else:
+            console.print(
+                "\n[bold green]All tracks are already compatible! No conversion needed.[/bold green]\n"
+            )
         return
 
     console.print(
@@ -585,12 +606,17 @@ def convert(
         task_errors = [task.error for task in summary.tasks if task.error]
         errors = preflight or task_errors
         first_error = f"\n• First error: {escape(errors[0])}" if errors else ""
+        recovery = (
+            f"\n• Recovery archive: {escape(str(result['local_backup_session']))}"
+            if result.get("local_backup_session")
+            else ""
+        )
         console.print(
             Panel(
                 f"[bold red]Conversion did not complete successfully.[/bold red]\n"
                 f"• Succeeded: {result.get('completed', 0)}\n"
                 f"• Failed: {result.get('failed', 0)}\n"
-                f"• {error_detail}{first_error}",
+                f"• {error_detail}{first_error}{recovery}",
                 title="Conversion Finished with Errors",
                 border_style="red",
             )

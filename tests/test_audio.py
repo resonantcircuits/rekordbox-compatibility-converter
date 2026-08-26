@@ -143,3 +143,21 @@ def test_audio_converter_rejects_truncated_source_that_decodes_partially(
     assert size == 0
     assert error
     assert not output.exists()
+
+
+def test_audio_converter_downmixes_multichannel_audio_to_stereo(tmp_path: Path):
+    source = tmp_path / "surround.flac"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i",
+            "anullsrc=channel_layout=5.1:sample_rate=44100", "-t", "0.05", str(source),
+        ],
+        check=True,
+    )
+    target = tmp_path / "stereo.aiff"
+    converter = AudioConverter()
+
+    success, _size, error = converter.convert(source, target, TargetFormat.AIFF)
+
+    assert success is True, error
+    assert converter.probe(target)["channels"] == 2

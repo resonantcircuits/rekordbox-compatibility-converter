@@ -22,6 +22,8 @@ The profile information button lists the covered hardware. The **Help** menu kee
 
 Conversion defaults to two workers. Increasing the count can make USB flash drives slower because reads and writes compete on the same device.
 
+If every track is already compatible, the CLI and GUI still offer USB ghost-file cleanup for macOS AppleDouble (`._*`) and `.DS_Store` files. This cleanup does not modify audio, Device Library, OneLibrary, or ANLZ data.
+
 ### Audio Folder mode
 
 Select **Audio Folder** to work without a Rekordbox export:

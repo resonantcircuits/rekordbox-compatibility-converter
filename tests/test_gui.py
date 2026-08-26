@@ -403,6 +403,74 @@ def test_conversion_progress_shows_track_count_and_latest_file():
     assert "Example.flac" in status.config["text"]
 
 
+def test_failed_conversion_resets_progress_and_shows_recovery_archive(monkeypatch):
+    progress = _FakeWidget()
+    warning = {}
+    gui = SimpleNamespace(
+        is_converting=True,
+        progress_bar=progress,
+        _set_conversion_controls=lambda _enabled: None,
+        btn_scan=_FakeWidget(),
+        btn_restore=_FakeWidget(),
+        btn_cleanup=_FakeWidget(),
+        btn_convert=_FakeWidget(),
+        lbl_status=_FakeWidget(),
+        del_switch=_FakeWidget(),
+        backup_switch=_FakeWidget(),
+        summary=SimpleNamespace(),
+    )
+    conversion_summary = SimpleNamespace(
+        tasks=[],
+        onelibrary_bridge_mode=True,
+    )
+    monkeypatch.setattr(
+        modern_app.messagebox,
+        "showwarning",
+        lambda title, message: warning.update(title=title, message=message),
+    )
+
+    ModernRekordboxGUI._on_finish(
+        gui,
+        {
+            "success": False,
+            "completed": 0,
+            "failed": 1,
+            "error": "verification failed",
+            "local_backup_session": "/Backups/session",
+        },
+        conversion_summary,
+        True,
+    )
+
+    assert progress.value == 0
+    assert "/Backups/session" in warning["message"]
+
+
+def test_dotfile_cleanup_completion_reports_no_library_changes(monkeypatch):
+    messages = []
+    gui = SimpleNamespace(
+        is_converting=True,
+        progress_bar=_FakeWidget(),
+        _set_conversion_controls=lambda _enabled: None,
+        btn_scan=_FakeWidget(),
+        btn_restore=_FakeWidget(),
+        btn_cleanup=_FakeWidget(),
+        btn_convert=_FakeWidget(),
+        lbl_status=_FakeWidget(),
+    )
+    monkeypatch.setattr(
+        modern_app.messagebox,
+        "showinfo",
+        lambda title, message: messages.append((title, message)),
+    )
+
+    ModernRekordboxGUI._on_dotfile_cleanup_finish(gui, 3)
+
+    assert gui.progress_bar.value == 1.0
+    assert "removed 3" in gui.lbl_status.config["text"]
+    assert "No audio or Rekordbox library data was changed" in messages[0][1]
+
+
 def test_backup_phase_shows_file_count_and_latest_file():
     progress = _FakeWidget()
     button = _FakeWidget()

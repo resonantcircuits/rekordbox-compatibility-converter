@@ -192,6 +192,12 @@ class AudioConverter:
         source_info = self.probe(source_path)
         source_rate = int(source_info.get("sample_rate") or 0)
         source_depth = int(source_info.get("bits_per_sample") or 0)
+        source_channels = int(source_info.get("channels") or 0)
+
+        # Club players consume mono or stereo program audio. Preserve mono and
+        # stereo sources exactly, but downmix multichannel material to stereo.
+        if source_channels > 2:
+            cmd.extend(["-ac", "2"])
 
         # TPDF dithering is useful for bit-depth reduction or resampling, but
         # should not be forced onto a same-rate, same-depth lossless transfer.
@@ -241,6 +247,10 @@ class AudioConverter:
             if int(output_info.get("sample_rate") or 0) != sample_rate:
                 tmp_target.unlink(missing_ok=True)
                 return False, 0, "Converted output has an unexpected sample rate."
+            expected_channels = 2 if source_channels > 2 else source_channels
+            if expected_channels and int(output_info.get("channels") or 0) != expected_channels:
+                tmp_target.unlink(missing_ok=True)
+                return False, 0, "Converted output has an unexpected channel count."
             if target_format in {TargetFormat.AIFF, TargetFormat.WAV}:
                 expected_codec = {
                     (TargetFormat.AIFF, 16): "pcm_s16be",

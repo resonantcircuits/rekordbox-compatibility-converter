@@ -1755,9 +1755,17 @@ class ModernRekordboxGUI(ctk.CTk):
                     )
                 )
         else:
-            self.btn_convert.configure(state="disabled")
+            cleanup_available = self.dotfiles_switch.get() == 1
+            self.btn_convert.configure(
+                state="normal" if cleanup_available else "disabled",
+                text="Clean USB Ghost Files" if cleanup_available else "Convert Planned Tracks",
+            )
             self.lbl_status.configure(
-                text="Scan complete: no conversion is needed for the selected settings."
+                text=(
+                    "All tracks are compatible. USB ghost-file cleanup is available."
+                    if cleanup_available
+                    else "Scan complete: no conversion is needed for the selected settings."
+                )
             )
             if self.show_guidance_var.get():
                 messagebox.showinfo(
@@ -1789,11 +1797,16 @@ class ModernRekordboxGUI(ctk.CTk):
         if self.mode_var.get() == "Audio Folder":
             self._start_folder_conversion()
             return
-        if not self.summary or not (
+        if not self.summary:
+            return
+        has_library_work = bool(
             self.summary.tasks
             or self.summary.analysis_repairs
             or self.summary.bitrate_repairs
-        ):
+        )
+        if not has_library_work:
+            if self.dotfiles_switch.get() == 1:
+                self._start_dotfile_cleanup()
             return
 
         if self.summary.tasks:
@@ -1977,6 +1990,49 @@ class ModernRekordboxGUI(ctk.CTk):
             )
 
         threading.Thread(target=run, daemon=True).start()
+
+    def _start_dotfile_cleanup(self) -> None:
+        if not self.summary or not messagebox.askyesno(
+            "Clean USB Ghost Files",
+            "Remove macOS AppleDouble (._*) and .DS_Store files from this USB?",
+            default=messagebox.YES,
+        ):
+            return
+        usb_root = self.summary.usb_root
+        self.is_converting = True
+        self.btn_scan.configure(state="disabled")
+        self.btn_restore.configure(state="disabled")
+        self.btn_cleanup.configure(state="disabled")
+        self._set_conversion_controls(False)
+        self.progress_bar.configure(mode="indeterminate")
+        self.progress_bar.start()
+        self.lbl_status.configure(text="Cleaning macOS ghost files. Do not eject the USB.")
+
+        def run():
+            try:
+                cleaned = self.engine.clean_dotfiles(usb_root)
+            except Exception as exc:
+                self._post_to_ui(self._on_conversion_error, str(exc))
+                return
+            self._post_to_ui(self._on_dotfile_cleanup_finish, cleaned)
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _on_dotfile_cleanup_finish(self, cleaned: int) -> None:
+        self.is_converting = False
+        self.progress_bar.stop()
+        self.progress_bar.configure(mode="determinate")
+        self.progress_bar.set(1.0)
+        self._set_conversion_controls(True)
+        self.btn_scan.configure(state="normal")
+        self.btn_restore.configure(state="normal")
+        self.btn_cleanup.configure(state="normal")
+        self.btn_convert.configure(state="disabled", text="Clean USB Ghost Files")
+        self.lbl_status.configure(text=f"Cleanup complete: removed {cleaned} ghost file(s).")
+        messagebox.showinfo(
+            "USB Cleanup Complete",
+            f"Removed {cleaned} macOS ghost file(s). No audio or Rekordbox library data was changed.",
+        )
 
     def _start_folder_conversion(self) -> None:
         summary = self.folder_summary
@@ -2203,7 +2259,7 @@ class ModernRekordboxGUI(ctk.CTk):
         self.btn_scan.configure(state="normal")
         self.btn_restore.configure(state="normal")
         self.btn_cleanup.configure(state="normal")
-        self.progress_bar.set(1.0)
+        self.progress_bar.set(1.0 if result.get("success") else 0)
 
         if result.get("success"):
             adopted = result.get("adopted_existing_targets", 0)
@@ -2289,9 +2345,14 @@ class ModernRekordboxGUI(ctk.CTk):
                 detail = f"\n\nWhy conversion stopped:\n{result['error']}"
             else:
                 detail = ""
+            recovery = (
+                f"\n\nRecovery archive:\n{result['local_backup_session']}"
+                if result.get("local_backup_session")
+                else ""
+            )
             messagebox.showwarning(
                 "Completed with Errors",
-                f"Converted: {completed}\nFailed: {failed}{detail}"
+                f"Converted: {completed}\nFailed: {failed}{detail}{recovery}"
                 + (
                     "\n\nOneLibrary was not updated. Keep the local recovery archive and either "
                     "restore it or resolve the failed tracks before rebuilding OneLibrary."

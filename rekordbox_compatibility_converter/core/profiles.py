@@ -9,6 +9,7 @@ class AudioProperties(Protocol):
     codec_name: str
     sample_rate: int
     sample_depth: int
+    channels: int
 
 
 class HardwareProfile:
@@ -126,6 +127,12 @@ class HardwareProfile:
             is_compatible = False
             reasons.append(
                 f"Sample depth {track.sample_depth}-bit is not in supported depths {sorted(self.allowed_sample_depths)}."
+            )
+
+        if track.channels > 2:
+            is_compatible = False
+            reasons.append(
+                f"Audio has {track.channels} channels; CDJ-compatible output is limited to mono or stereo."
             )
 
         # Determine target parameters

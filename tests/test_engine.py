@@ -136,6 +136,73 @@ def test_scan_enforces_16_bit_across_otherwise_compatible_lossless_audio(
     assert engine.audio_converter.probe(source)["bits_per_sample"] == 24
 
 
+@pytest.mark.parametrize("actual_kind", ["wrong_codec", "stale_rate"])
+def test_scan_uses_probed_audio_properties_before_marking_track_compatible(
+    tmp_path: Path, actual_kind: str
+):
+    usb = tmp_path / "USB"
+    contents = usb / "Contents"
+    rekordbox = usb / "PIONEER" / "rekordbox"
+    contents.mkdir(parents=True)
+    rekordbox.mkdir(parents=True)
+    audio = contents / "song.aiff"
+    generated = contents / ("payload.mp3" if actual_kind == "wrong_codec" else "payload.aiff")
+    command = [
+        "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.05",
+        "-ar", "44100" if actual_kind == "wrong_codec" else "96000",
+    ]
+    if actual_kind == "wrong_codec":
+        command.extend(["-c:a", "libmp3lame"])
+    else:
+        command.extend(["-c:a", "pcm_s16be"])
+    command.append(str(generated))
+    subprocess.run(command, check=True)
+    generated.rename(audio)
+    create_minimal_pdb(
+        rekordbox,
+        file_size=audio.stat().st_size,
+        filename="song.aiff",
+        filepath="/Contents/song.aiff",
+        file_type=0x0C,
+    )
+
+    summary = ConversionEngine().scan(usb)
+
+    assert summary.compatible_tracks == 0
+    assert summary.incompatible_tracks == 1
+    assert len(summary.tasks) == 1
+
+
+def test_scan_enforces_16_bit_using_probed_depth_when_database_is_stale(
+    tmp_path: Path,
+):
+    usb = tmp_path / "USB"
+    contents = usb / "Contents"
+    rekordbox = usb / "PIONEER" / "rekordbox"
+    contents.mkdir(parents=True)
+    rekordbox.mkdir(parents=True)
+    audio = contents / "song.aiff"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=0.05",
+            "-ar", "44100", "-c:a", "pcm_s24be", str(audio),
+        ],
+        check=True,
+    )
+    create_minimal_pdb(
+        rekordbox,
+        file_size=audio.stat().st_size,
+        filename="song.aiff",
+        filepath="/Contents/song.aiff",
+        file_type=0x0C,
+    )
+
+    summary = ConversionEngine().scan(usb, enforce_pcm_16_bit=True)
+
+    assert summary.incompatible_tracks == 1
+    assert summary.tasks[0].target_sample_depth == 16
+
+
 def test_engine_scan_and_execute_parallel(mock_usb: Path):
     engine = ConversionEngine()
     profile = get_profile(CompatibilityProfileType.STANDARD)
@@ -596,6 +663,43 @@ def test_local_archive_conversion_failure_restores_usb_original(
     )
     assert manifest["status"] == "complete_with_errors"
     assert manifest["originals"][0]["status"] == "restored_after_failure"
+
+
+def test_local_archive_second_probe_failure_restores_usb_original(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    summary = engine.scan(mock_usb)
+    real_convert = engine.audio_converter.convert
+    real_probe = engine.audio_converter.probe
+    conversion_finished = False
+
+    def convert_then_fail_verification(**kwargs):
+        nonlocal conversion_finished
+        result = real_convert(**kwargs)
+        conversion_finished = True
+        return result
+
+    def fail_only_second_probe(path):
+        if conversion_finished:
+            return {"probe_error": "simulated second-pass verification failure"}
+        return real_probe(path)
+
+    monkeypatch.setattr(engine.audio_converter, "convert", convert_then_fail_verification)
+    monkeypatch.setattr(engine.audio_converter, "probe", fail_only_second_probe)
+
+    result = engine.execute(
+        summary,
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+
+    assert result["success"] is False
+    assert (mock_usb / "Contents" / "song.flac").is_file()
+    assert not (mock_usb / "Contents" / "song.aiff").exists()
 
 
 def test_local_archive_requires_confirmation_before_replacing_existing_target(
@@ -1296,6 +1400,50 @@ def test_restore_local_archive_rejects_manifest_path_traversal(
 
     assert restored is False
     assert "Unsafe usb_path" in message
+
+
+def test_restore_local_archive_rejects_symlink_escape(tmp_path: Path):
+    usb = tmp_path / "USB"
+    outside = tmp_path / "outside"
+    session = tmp_path / "session"
+    usb.mkdir()
+    outside.mkdir()
+    session.mkdir()
+    try:
+        (usb / "Contents").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Symbolic links unavailable: {exc}")
+    archive = session / "original.flac"
+    archive.write_bytes(b"archived audio")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (session / "manifest.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "usb_root": str(usb),
+                "status": "complete",
+                "originals": [
+                    {
+                        "usb_path": "Contents/escaped.flac",
+                        "archive_path": "original.flac",
+                        "size": archive.stat().st_size,
+                        "sha256": digest,
+                        "status": "archived",
+                        "target_paths": [],
+                    }
+                ],
+                "preexisting_targets": [],
+                "metadata": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    restored, message = ConversionEngine().restore_local_backup(session, usb)
+
+    assert restored is False
+    assert "escapes its selected root" in message
+    assert not (outside / "escaped.flac").exists()
 
 
 def _complete_onelibrary_bridge(mock_usb: Path):

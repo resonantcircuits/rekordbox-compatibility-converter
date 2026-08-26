@@ -51,6 +51,19 @@ class LocalBackupSession:
         except OSError:
             pass
 
+    @staticmethod
+    def _safe_join(root: Path, relative_value: str, label: str) -> Path:
+        """Join a manifest path without allowing symlinks to escape its root."""
+        resolved_root = Path(root).resolve()
+        candidate = resolved_root / relative_value
+        resolved_candidate = candidate.resolve(strict=False)
+        if not (
+            resolved_candidate == resolved_root
+            or resolved_root in resolved_candidate.parents
+        ):
+            raise ValueError(f"Unsafe {label} escapes its selected root: {relative_value}")
+        return candidate
+
     @classmethod
     def validate_destination(cls, base_dir: Path, usb_root: Path) -> Path:
         """Require a writable local archive directory outside the selected USB."""
@@ -339,7 +352,9 @@ class LocalBackupSession:
         )
         if not entry:
             raise ValueError(f"Source is missing from local backup manifest: {source}")
-        archive = self.session_dir / entry["archive_path"]
+        archive = self._safe_join(
+            self.session_dir, entry["archive_path"], "archive_path"
+        )
         if not archive.is_file() or archive.stat().st_size != entry["size"]:
             raise ValueError(f"Archived original is missing or changed: {archive}")
         return archive
@@ -367,8 +382,10 @@ class LocalBackupSession:
 
         try:
             for entry in entries:
-                source = self.usb_root / entry["usb_path"]
-                archive = self.session_dir / entry["archive_path"]
+                source = self._safe_join(self.usb_root, entry["usb_path"], "usb_path")
+                archive = self._safe_join(
+                    self.session_dir, entry["archive_path"], "archive_path"
+                )
                 if self._sha256(
                     archive,
                     lambda amount, path=source: advance(amount, path),
@@ -398,8 +415,10 @@ class LocalBackupSession:
         self._save_manifest()
 
     def _restore_entry(self, entry: Dict) -> None:
-        source = self.usb_root / entry["usb_path"]
-        archive = self.session_dir / entry["archive_path"]
+        source = self._safe_join(self.usb_root, entry["usb_path"], "usb_path")
+        archive = self._safe_join(
+            self.session_dir, entry["archive_path"], "archive_path"
+        )
         if source.exists():
             if self._sha256(source) != entry["sha256"]:
                 raise OSError(f"Refusing to overwrite changed USB original: {source}")
@@ -451,7 +470,9 @@ class LocalBackupSession:
     def finish(self, success: bool) -> None:
         with self._lock:
             for entry in self.manifest["metadata"]:
-                current = self.usb_root / entry["usb_path"]
+                current = self._safe_join(
+                    self.usb_root, entry["usb_path"], "usb_path"
+                )
                 if current.is_file():
                     entry["post_conversion_size"] = current.stat().st_size
                     entry["post_conversion_sha256"] = self._sha256(current)
@@ -471,19 +492,25 @@ class LocalBackupSession:
                 if entry.get("converted_path")
             }
             for entry in self.manifest["originals"]:
-                archive = self.session_dir / entry["archive_path"]
+                archive = self._safe_join(
+                    self.session_dir, entry["archive_path"], "archive_path"
+                )
                 if not archive.is_file() or self._sha256(archive) != entry["sha256"]:
                     raise ValueError(f"Archived original is missing or changed: {archive}")
                 converted_path = entry.get("converted_path")
                 if converted_path:
-                    converted = destination_root / converted_path
+                    converted = self._safe_join(
+                        destination_root, converted_path, "converted_path"
+                    )
                     if converted.is_file() and self._sha256(converted) != entry.get(
                         "converted_sha256"
                     ):
                         raise ValueError(
                             f"Converted file changed after this backup was created: {converted}"
                         )
-                original = destination_root / entry["usb_path"]
+                original = self._safe_join(
+                    destination_root, entry["usb_path"], "usb_path"
+                )
                 if (
                     original.is_file()
                     and entry.get("converted_path") != entry["usb_path"]
@@ -492,10 +519,14 @@ class LocalBackupSession:
                     raise ValueError(f"Original path contains an unrelated changed file: {original}")
 
             for entry in self.manifest["preexisting_targets"]:
-                archive = self.session_dir / entry["archive_path"]
+                archive = self._safe_join(
+                    self.session_dir, entry["archive_path"], "archive_path"
+                )
                 if not archive.is_file() or self._sha256(archive) != entry["sha256"]:
                     raise ValueError(f"Archived pre-existing target is missing or changed: {archive}")
-                current = destination_root / entry["usb_path"]
+                current = self._safe_join(
+                    destination_root, entry["usb_path"], "usb_path"
+                )
                 if current.is_file():
                     current_digest = self._sha256(current)
                     converted_entry = converted_by_path.get(entry["usb_path"])
@@ -508,8 +539,12 @@ class LocalBackupSession:
                         )
 
             for entry in self.manifest["metadata"]:
-                archive = self.session_dir / entry["archive_path"]
-                current = destination_root / entry["usb_path"]
+                archive = self._safe_join(
+                    self.session_dir, entry["archive_path"], "archive_path"
+                )
+                current = self._safe_join(
+                    destination_root, entry["usb_path"], "usb_path"
+                )
                 if not archive.is_file() or self._sha256(archive) != entry["sha256"]:
                     raise ValueError(f"Archived metadata is missing or changed: {archive}")
                 expected_current = entry.get("post_conversion_sha256")
@@ -525,15 +560,21 @@ class LocalBackupSession:
             bytes_to_restore = sum(
                 entry["size"]
                 for entry in self.manifest["originals"]
-                if not (destination_root / entry["usb_path"]).is_file()
+                if not self._safe_join(
+                    destination_root, entry["usb_path"], "usb_path"
+                ).is_file()
                 or entry.get("converted_path") == entry["usb_path"]
             )
             reclaimable = sum(
-                (destination_root / entry["converted_path"]).stat().st_size
+                self._safe_join(
+                    destination_root, entry["converted_path"], "converted_path"
+                ).stat().st_size
                 for entry in self.manifest["originals"]
                 if entry.get("converted_path")
                 and not entry.get("converted_target_preexisting")
-                and (destination_root / entry["converted_path"]).is_file()
+                and self._safe_join(
+                    destination_root, entry["converted_path"], "converted_path"
+                ).is_file()
             )
             free_space = shutil.disk_usage(destination_root).free
             if bytes_to_restore > free_space + reclaimable:
@@ -543,16 +584,22 @@ class LocalBackupSession:
 
             affected_paths = set()
             for entry in self.manifest["originals"]:
-                affected_paths.add(destination_root / entry["usb_path"])
+                affected_paths.add(
+                    self._safe_join(destination_root, entry["usb_path"], "usb_path")
+                )
                 converted_path = entry.get("converted_path")
                 if converted_path and not entry.get("converted_target_preexisting"):
-                    affected_paths.add(destination_root / converted_path)
+                    affected_paths.add(
+                        self._safe_join(
+                            destination_root, converted_path, "converted_path"
+                        )
+                    )
             affected_paths.update(
-                destination_root / entry["usb_path"]
+                self._safe_join(destination_root, entry["usb_path"], "usb_path")
                 for entry in self.manifest["preexisting_targets"]
             )
             affected_paths.update(
-                destination_root / entry["usb_path"]
+                self._safe_join(destination_root, entry["usb_path"], "usb_path")
                 for entry in self.manifest["metadata"]
             )
             manifest_before_restore = json.loads(json.dumps(self.manifest))
@@ -576,13 +623,19 @@ class LocalBackupSession:
                     for entry in self.manifest["originals"]:
                         converted_path = entry.get("converted_path")
                         if converted_path and not entry.get("converted_target_preexisting"):
-                            converted = destination_root / converted_path
+                            converted = self._safe_join(
+                                destination_root, converted_path, "converted_path"
+                            )
                             converted.unlink(missing_ok=True)
                             self._sync_directory(converted.parent)
 
                     for entry in self.manifest["originals"]:
-                        original = destination_root / entry["usb_path"]
-                        archive = self.session_dir / entry["archive_path"]
+                        original = self._safe_join(
+                            destination_root, entry["usb_path"], "usb_path"
+                        )
+                        archive = self._safe_join(
+                            self.session_dir, entry["archive_path"], "archive_path"
+                        )
                         if not original.is_file():
                             size, digest = self._copy_verified(archive, original)
                             if size != entry["size"] or digest != entry["sha256"]:
@@ -590,8 +643,12 @@ class LocalBackupSession:
                         entry["status"] = "restored"
 
                     for entry in self.manifest["preexisting_targets"]:
-                        target = destination_root / entry["usb_path"]
-                        archive = self.session_dir / entry["archive_path"]
+                        target = self._safe_join(
+                            destination_root, entry["usb_path"], "usb_path"
+                        )
+                        archive = self._safe_join(
+                            self.session_dir, entry["archive_path"], "archive_path"
+                        )
                         size, digest = self._copy_verified(archive, target)
                         if size != entry["size"] or digest != entry["sha256"]:
                             raise OSError(
@@ -606,8 +663,12 @@ class LocalBackupSession:
                         key=lambda entry: Path(entry["usb_path"]).name == "export.pdb",
                     )
                     for entry in metadata_entries:
-                        archive = self.session_dir / entry["archive_path"]
-                        current = destination_root / entry["usb_path"]
+                        archive = self._safe_join(
+                            self.session_dir, entry["archive_path"], "archive_path"
+                        )
+                        current = self._safe_join(
+                            destination_root, entry["usb_path"], "usb_path"
+                        )
                         size, digest = self._copy_verified(archive, current)
                         if size != entry["size"] or digest != entry["sha256"]:
                             raise OSError(f"Restored metadata failed verification: {current}")
