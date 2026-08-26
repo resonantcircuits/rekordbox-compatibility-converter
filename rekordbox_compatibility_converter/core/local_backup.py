@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -540,40 +541,100 @@ class LocalBackupSession:
                     "The USB does not have enough recoverable space to restore this archive."
                 )
 
+            affected_paths = set()
             for entry in self.manifest["originals"]:
+                affected_paths.add(destination_root / entry["usb_path"])
                 converted_path = entry.get("converted_path")
                 if converted_path and not entry.get("converted_target_preexisting"):
-                    converted = destination_root / converted_path
-                    converted.unlink(missing_ok=True)
-                    self._sync_directory(converted.parent)
+                    affected_paths.add(destination_root / converted_path)
+            affected_paths.update(
+                destination_root / entry["usb_path"]
+                for entry in self.manifest["preexisting_targets"]
+            )
+            affected_paths.update(
+                destination_root / entry["usb_path"]
+                for entry in self.manifest["metadata"]
+            )
+            manifest_before_restore = json.loads(json.dumps(self.manifest))
 
-            for entry in self.manifest["originals"]:
-                original = destination_root / entry["usb_path"]
-                archive = self.session_dir / entry["archive_path"]
-                if not original.is_file():
-                    size, digest = self._copy_verified(archive, original)
-                    if size != entry["size"] or digest != entry["sha256"]:
-                        raise OSError(f"Restored original failed verification: {original}")
-                entry["status"] = "restored"
+            # Keep rollback bytes off the USB so converted files may still be
+            # reclaimed before originals are copied back on space-tight drives.
+            with tempfile.TemporaryDirectory(
+                prefix=".restore-rollback-", dir=self.session_dir
+            ) as rollback_dir_name:
+                rollback_dir = Path(rollback_dir_name)
+                snapshots: Dict[Path, Optional[Path]] = {}
+                for index, current in enumerate(sorted(affected_paths, key=str)):
+                    if current.is_file():
+                        snapshot = rollback_dir / f"{index:08d}.bin"
+                        self._copy_verified(current, snapshot)
+                        snapshots[current] = snapshot
+                    else:
+                        snapshots[current] = None
 
-            for entry in self.manifest["preexisting_targets"]:
-                target = destination_root / entry["usb_path"]
-                archive = self.session_dir / entry["archive_path"]
-                size, digest = self._copy_verified(archive, target)
-                if size != entry["size"] or digest != entry["sha256"]:
-                    raise OSError(f"Restored pre-existing target failed verification: {target}")
-                entry["status"] = "restored"
+                try:
+                    for entry in self.manifest["originals"]:
+                        converted_path = entry.get("converted_path")
+                        if converted_path and not entry.get("converted_target_preexisting"):
+                            converted = destination_root / converted_path
+                            converted.unlink(missing_ok=True)
+                            self._sync_directory(converted.parent)
 
-            for entry in self.manifest["metadata"]:
-                archive = self.session_dir / entry["archive_path"]
-                current = destination_root / entry["usb_path"]
-                size, digest = self._copy_verified(archive, current)
-                if size != entry["size"] or digest != entry["sha256"]:
-                    raise OSError(f"Restored metadata failed verification: {current}")
+                    for entry in self.manifest["originals"]:
+                        original = destination_root / entry["usb_path"]
+                        archive = self.session_dir / entry["archive_path"]
+                        if not original.is_file():
+                            size, digest = self._copy_verified(archive, original)
+                            if size != entry["size"] or digest != entry["sha256"]:
+                                raise OSError(f"Restored original failed verification: {original}")
+                        entry["status"] = "restored"
 
-            self.manifest["status"] = "restored"
-            self.manifest["restored_utc"] = datetime.now(timezone.utc).isoformat()
-            self._save_manifest()
+                    for entry in self.manifest["preexisting_targets"]:
+                        target = destination_root / entry["usb_path"]
+                        archive = self.session_dir / entry["archive_path"]
+                        size, digest = self._copy_verified(archive, target)
+                        if size != entry["size"] or digest != entry["sha256"]:
+                            raise OSError(
+                                f"Restored pre-existing target failed verification: {target}"
+                            )
+                        entry["status"] = "restored"
+
+                    # Restore the catalog last so it never durably points at
+                    # audio or analysis files that have not yet been restored.
+                    metadata_entries = sorted(
+                        self.manifest["metadata"],
+                        key=lambda entry: Path(entry["usb_path"]).name == "export.pdb",
+                    )
+                    for entry in metadata_entries:
+                        archive = self.session_dir / entry["archive_path"]
+                        current = destination_root / entry["usb_path"]
+                        size, digest = self._copy_verified(archive, current)
+                        if size != entry["size"] or digest != entry["sha256"]:
+                            raise OSError(f"Restored metadata failed verification: {current}")
+
+                    self.manifest["status"] = "restored"
+                    self.manifest["restored_utc"] = datetime.now(timezone.utc).isoformat()
+                    self._save_manifest()
+                except Exception as restore_exc:
+                    rollback_errors = []
+                    self.manifest = manifest_before_restore
+                    for current, snapshot in reversed(list(snapshots.items())):
+                        try:
+                            if snapshot is None:
+                                current.unlink(missing_ok=True)
+                                self._sync_directory(current.parent)
+                            else:
+                                self._copy_verified(snapshot, current)
+                        except Exception as rollback_exc:
+                            rollback_errors.append(f"{current}: {rollback_exc}")
+                    if rollback_errors:
+                        raise RuntimeError(
+                            f"Restore failed: {restore_exc}; rollback also failed for "
+                            + "; ".join(rollback_errors)
+                        ) from restore_exc
+                    raise RuntimeError(
+                        f"Restore failed and the prior USB state was restored: {restore_exc}"
+                    ) from restore_exc
             return True, f"Restored USB from local backup session: {self.session_dir}"
         except Exception as exc:
             return False, f"Local backup restore refused or failed: {exc}"

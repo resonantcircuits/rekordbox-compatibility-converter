@@ -303,6 +303,41 @@ def test_scan_repairs_v030_bitrate_units_without_touching_audio_or_waveforms(
     assert hashlib.sha256(anlz_path.read_bytes()).hexdigest() == anlz_before
 
 
+def test_scan_repairs_legacy_mp3_bitrate_despite_container_average_variance(
+    mock_usb: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    converted = engine.execute(
+        engine.scan(mock_usb, forced_target_format=TargetFormat.MP3),
+        delete_original=False,
+        backup=False,
+        clean_dotfiles=False,
+        threads=1,
+    )
+    assert converted["success"] is True
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    manager = PDBManager(pdb_path)
+    track = manager.tracks[0]
+    assert manager.update_track_bitrate(track, 320000)
+    manager.save(backup=False)
+    real_probe = engine.audio_converter.probe
+
+    def variable_average_probe(path):
+        probe = real_probe(path)
+        if Path(path).suffix.lower() == ".mp3":
+            probe["bit_rate"] = 323000
+        return probe
+
+    monkeypatch.setattr(engine.audio_converter, "probe", variable_average_probe)
+
+    repair_plan = engine.scan(mock_usb)
+
+    assert repair_plan.tasks == []
+    assert len(repair_plan.bitrate_repairs) == 1
+    assert repair_plan.bitrate_repairs[0].old_bitrate == 320000
+    assert repair_plan.bitrate_repairs[0].new_bitrate == 320
+
+
 def test_engine_refuses_existing_target_without_overwriting(mock_usb: Path):
     target = mock_usb / "Contents" / "song.aiff"
     target.write_bytes(b"existing user file")
@@ -864,6 +899,56 @@ def test_compatible_track_repairs_extension_only_stale_waveform_paths(
     assert len(manifest["metadata"]) >= 4
 
 
+def test_compatible_track_repairs_only_divergent_stale_2ex(
+    mock_usb: Path, tmp_path: Path
+):
+    engine = ConversionEngine()
+    flac = mock_usb / "Contents" / "song.flac"
+    mp3 = mock_usb / "Contents" / "song.mp3"
+    success, _size, error = engine.audio_converter.convert(
+        flac, mp3, target_format=TargetFormat.MP3
+    )
+    assert success is True, error
+    flac.unlink()
+    create_minimal_pdb(
+        mock_usb / "PIONEER" / "rekordbox",
+        file_size=mp3.stat().st_size,
+        filename="song.mp3",
+        filepath="/Contents/song.mp3",
+        analyze_path="/PIONEER/USBANLZ/P001/00000001/ANLZ0000.DAT",
+        file_type=0x01,
+        bitrate=320,
+    )
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    current_dir = tmp_path / "current"
+    stale_dir = tmp_path / "stale"
+    current_dir.mkdir()
+    stale_dir.mkdir()
+    current = create_minimal_anlz(current_dir, "/Contents/song.mp3").read_bytes()
+    stale = create_minimal_anlz(stale_dir, "/Contents/song.flac").read_bytes()
+    (anlz_dir / "ANLZ0000.DAT").write_bytes(current)
+    (anlz_dir / "ANLZ0000.EXT").write_bytes(current)
+    (anlz_dir / "ANLZ0000.2EX").write_bytes(stale)
+
+    summary = engine.scan(mock_usb)
+
+    assert summary.tasks == []
+    assert len(summary.analysis_repairs) == 1
+    repair = summary.analysis_repairs[0]
+    assert repair.old_audio_path == "/Contents/song.flac"
+    assert repair.sidecar_paths == [anlz_dir / "ANLZ0000.2EX"]
+
+    result = engine.execute(summary, backup=False, clean_dotfiles=False)
+
+    assert result["success"] is True, result
+    assert result["analysis_paths_repaired"] == 1
+    assert all(
+        ANLZManager.read_path(anlz_dir / f"ANLZ0000{suffix}")
+        == "/Contents/song.mp3"
+        for suffix in (".DAT", ".EXT", ".2EX")
+    )
+
+
 def test_stale_waveform_path_with_different_stem_is_not_auto_repaired(mock_usb: Path):
     engine = ConversionEngine()
     flac = mock_usb / "Contents" / "song.flac"
@@ -1003,6 +1088,65 @@ def test_restore_local_archive_recovers_audio_database_and_waveforms(
         )
     manifest = json.loads((session / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "restored"
+
+
+def test_restore_local_archive_rolls_back_every_file_on_metadata_failure(
+    mock_usb: Path, tmp_path: Path, monkeypatch
+):
+    engine = ConversionEngine()
+    result = engine.execute(
+        engine.scan(mock_usb),
+        delete_original=True,
+        backup=True,
+        clean_dotfiles=False,
+        threads=1,
+        local_original_backup_dir=tmp_path / "Local Backups",
+    )
+    session = Path(result["local_backup_session"])
+    converted = mock_usb / "Contents" / "song.aiff"
+    converted_digest = hashlib.sha256(converted.read_bytes()).hexdigest()
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    pdb_digest = hashlib.sha256(pdb_path.read_bytes()).hexdigest()
+    anlz_dir = mock_usb / "PIONEER" / "USBANLZ" / "P001" / "00000001"
+    analysis_digests = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in (
+            anlz_dir / "ANLZ0000.DAT",
+            anlz_dir / "ANLZ0000.EXT",
+            anlz_dir / "ANLZ0000.2EX",
+        )
+    }
+    original_copy = LocalBackupSession._copy_verified
+    failed_once = False
+
+    def fail_first_database_restore(
+        backup_session, source, destination, progress_callback=None
+    ):
+        nonlocal failed_once
+        if Path(destination).name == "export.pdb" and not failed_once:
+            failed_once = True
+            raise OSError("injected database restore failure")
+        return original_copy(
+            backup_session, source, destination, progress_callback
+        )
+
+    monkeypatch.setattr(
+        LocalBackupSession, "_copy_verified", fail_first_database_restore
+    )
+
+    restored, message = engine.restore_local_backup(session, mock_usb)
+
+    assert restored is False
+    assert "prior USB state was restored" in message
+    assert failed_once is True
+    assert not (mock_usb / "Contents" / "song.flac").exists()
+    assert hashlib.sha256(converted.read_bytes()).hexdigest() == converted_digest
+    assert hashlib.sha256(pdb_path.read_bytes()).hexdigest() == pdb_digest
+    assert PDBManager(pdb_path).tracks[0].file_path == "/Contents/song.aiff"
+    assert all(
+        hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        for path, digest in analysis_digests.items()
+    )
 
 
 def test_restore_local_archive_refuses_changed_converted_file(

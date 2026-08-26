@@ -190,6 +190,7 @@ class ExportValidator:
                     actual_rate = int(probe.get("sample_rate") or 0)
                     actual_depth = int(probe.get("bits_per_sample") or 0)
                     actual_channels = int(probe.get("channels") or 0)
+                    actual_duration = float(probe.get("duration") or 0)
                     if actual_rate and actual_rate != track.sample_rate:
                         track_has_issue = True
                         report.issues.append(
@@ -208,6 +209,21 @@ class ExportValidator:
                                 track.title or track.filename,
                                 "WARNING",
                                 f"Bit-depth mismatch: DB says {track.sample_depth}-bit, audio reports {actual_depth}-bit",
+                            )
+                        )
+                    if (
+                        track.duration > 0
+                        and actual_duration > 0
+                        and abs(actual_duration - track.duration) > 2.0
+                    ):
+                        track_has_issue = True
+                        report.issues.append(
+                            ValidationIssue(
+                                track.id,
+                                track.title or track.filename,
+                                "ERROR",
+                                f"Duration mismatch: DB says {track.duration} seconds, "
+                                f"audio reports {actual_duration:.3f} seconds",
                             )
                         )
                     codec_name = str(probe.get("codec_name") or "")

@@ -24,6 +24,7 @@ def create_minimal_pdb(
     database_sequence: int = 48,
     page_sequence: int = 47,
     bitrate: int = 1411,
+    duration: int = 1,
 ) -> Path:
     """Creates a valid, minimal DeviceSQL export.pdb for testing."""
     len_page = 4096
@@ -60,7 +61,6 @@ def create_minimal_pdb(
     sample_rate = 44100
     track_id = 101
     sample_depth = 16
-    duration = 240
 
     struct.pack_into("<I", page1, row_base + 0x08, sample_rate)
     struct.pack_into("<I", page1, row_base + 0x10, file_size)

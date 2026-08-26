@@ -123,3 +123,17 @@ def test_validator_flags_bits_per_second_written_into_device_sql(mock_usb: Path)
         and "about 1411 kbps" in issue.message
         for issue in report.issues
     )
+
+
+def test_validator_rejects_audio_shorter_than_device_sql_duration(mock_usb: Path):
+    pdb_path = mock_usb / "PIONEER" / "rekordbox" / "export.pdb"
+    manager = PDBManager(pdb_path)
+    track = manager.tracks[0]
+    row_base = track.page_idx * manager.len_page + track.row_offset
+    struct.pack_into("<H", manager.data, row_base + 0x54, 20)
+    manager.save(backup=False)
+
+    report = ExportValidator().validate(mock_usb)
+
+    assert report.failed_tracks == 1
+    assert any("Duration mismatch" in issue.message for issue in report.issues)

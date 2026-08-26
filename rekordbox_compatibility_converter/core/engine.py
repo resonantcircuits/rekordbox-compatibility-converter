@@ -139,11 +139,20 @@ class ConversionEngine:
             for candidate in (dat_path.with_suffix(".EXT"), dat_path.with_suffix(".2EX"))
             if candidate.is_file() and cls._is_within(usb_root, candidate)
         )
-        stored_paths = [ANLZManager.read_path(path) for path in sidecars]
-        if any(path is None for path in stored_paths):
+        stored_paths = {
+            path: ANLZManager.read_path(path) for path in sidecars
+        }
+        if any(path is None for path in stored_paths.values()):
             return None
-        old_paths = {str(path) for path in stored_paths}
-        if old_paths == {track.file_path} or len(old_paths) != 1:
+        stale_sidecars = {
+            sidecar: str(stored_path)
+            for sidecar, stored_path in stored_paths.items()
+            if stored_path != track.file_path
+        }
+        if not stale_sidecars:
+            return None
+        old_paths = set(stale_sidecars.values())
+        if len(old_paths) != 1:
             return None
         old_path = next(iter(old_paths))
         old_posix = PurePosixPath(old_path)
@@ -161,7 +170,7 @@ class ConversionEngine:
             track=track,
             old_audio_path=old_path,
             new_audio_path=track.file_path,
-            sidecar_paths=sidecars,
+            sidecar_paths=list(stale_sidecars),
         )
 
     @staticmethod
@@ -428,16 +437,21 @@ class ConversionEngine:
                     probe = self.audio_converter.probe(source_abs)
                     if not probe.get("probe_error"):
                         expected_bitrate = self._probed_device_sql_bitrate(probe)
+                        stored_kilobits = device_sql_bitrate_kbps(track.bitrate)
+                        bitrate_tolerance = max(2, expected_bitrate // 50)
                         if (
                             expected_bitrate
                             and track.bitrate >= 100000
-                            and track.bitrate // 1000 == expected_bitrate
+                            and abs(stored_kilobits - expected_bitrate)
+                            <= bitrate_tolerance
                         ):
                             summary.bitrate_repairs.append(
                                 BitrateMetadataRepair(
                                     track=track,
                                     old_bitrate=track.bitrate,
-                                    new_bitrate=expected_bitrate,
+                                    # Container-average MP3 probes commonly
+                                    # vary around the intended nominal rate.
+                                    new_bitrate=stored_kilobits,
                                 )
                             )
                 repair = self._plan_analysis_path_repair(

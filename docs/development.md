@@ -40,14 +40,14 @@ the tag:
 
 ```bash
 uv lock
-RELEASE_TAG=v0.4.0 uv run --frozen --extra dev python -c "import os, tomllib; version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; expected = 'v' + version; actual = os.environ['RELEASE_TAG']; assert actual == expected, 'tag %r does not match package version %s' % (actual, expected)"
+RELEASE_TAG=v0.4.1 uv run --frozen --extra dev python -c "import os, tomllib; version = tomllib.load(open('pyproject.toml', 'rb'))['project']['version']; expected = 'v' + version; actual = os.environ['RELEASE_TAG']; assert actual == expected, 'tag %r does not match package version %s' % (actual, expected)"
 git add pyproject.toml uv.lock
-git commit -m "Prepare v0.4.0 release"
-git tag -a v0.4.0 -m "Release v0.4.0"
-git push origin main v0.4.0
+git commit -m "Prepare v0.4.1 release"
+git tag -a v0.4.1 -m "Release v0.4.1"
+git push origin main v0.4.1
 ```
 
-Replace `0.4.0` with the intended release version in all commands. Create the tag
+Replace `0.4.1` with the intended release version in all commands. Create the tag
 only after the version commit exists; verify the tag points to that commit before
 pushing it.
 

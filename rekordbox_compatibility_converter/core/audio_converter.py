@@ -179,6 +179,9 @@ class AudioConverter:
         cmd = [
             self.ffmpeg_bin,
             "-y",
+            # Without fatal decode errors, FFmpeg can accept a truncated source
+            # and emit a shorter but superficially valid output.
+            "-xerror",
             "-i", str(source_path),
             "-map", "0:a:0",
             "-ar", str(sample_rate),
@@ -254,6 +257,19 @@ class AudioConverter:
             elif target_format == TargetFormat.MP3 and output_info.get("codec_name") != "mp3":
                 tmp_target.unlink(missing_ok=True)
                 return False, 0, "Converted output is not MP3 audio."
+
+            source_duration = float(source_info.get("duration") or 0)
+            output_duration = float(output_info.get("duration") or 0)
+            if source_duration > 0 and output_duration > 0:
+                duration_tolerance = max(0.25, source_duration * 0.001)
+                if abs(source_duration - output_duration) > duration_tolerance:
+                    tmp_target.unlink(missing_ok=True)
+                    return (
+                        False,
+                        0,
+                        "Converted output duration differs from the source "
+                        f"({source_duration:.3f}s source, {output_duration:.3f}s output).",
+                    )
 
             with open(tmp_target, "r+b") as converted_file:
                 os.fsync(converted_file.fileno())

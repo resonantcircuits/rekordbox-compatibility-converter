@@ -47,8 +47,8 @@ The converter:
 - Produces 16-bit or 24-bit AIFF/WAV, or 320 kbps MP3.
 - Updates Device Library filenames, paths, format codes, sizes, sample rates, bit depths, and bitrates.
 - Updates `PPTH` paths in referenced `.DAT`, `.EXT`, and `.2EX` analysis files.
-- Writes converted output under a unique temporary name, verifies it, and commits the audio and metadata changes before removing an original.
-- Verifies decoded audio, extensions, format codes, metadata, and analysis references after conversion.
+- Writes converted output under a unique temporary name, makes source decode errors fatal, verifies codec/rate/depth and source-to-output duration, and commits the audio and metadata changes before removing an original.
+- Verifies audio duration, extensions, format codes, metadata, and analysis references after conversion.
 - Rejects malformed databases, missing sidecars, target collisions, and paths outside the selected USB before conversion.
 
 AIFF is the default because uncompressed PCM preserves sample timing and avoids beatgrid drift caused by lossy transcoding.

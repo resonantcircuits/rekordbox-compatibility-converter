@@ -111,3 +111,35 @@ def test_audio_converter_rejects_unsupported_pcm_depth(sample_flac: Path, tmp_pa
     assert size == 0
     assert "Unsupported target PCM depth" in error
     assert not target.exists()
+
+
+def test_audio_converter_rejects_truncated_source_that_decodes_partially(
+    tmp_path: Path,
+):
+    complete = tmp_path / "complete.flac"
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-f", "lavfi", "-i", "sine=frequency=440:duration=10",
+            "-c:a", "flac", str(complete),
+        ],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        check=True,
+    )
+    damaged = tmp_path / "damaged.flac"
+    source_bytes = complete.read_bytes()
+    damaged.write_bytes(source_bytes[: len(source_bytes) // 2])
+    output = tmp_path / "damaged.aiff"
+
+    success, size, error = AudioConverter().convert(
+        damaged,
+        output,
+        target_format=TargetFormat.AIFF,
+        sample_rate=44100,
+        sample_depth=16,
+    )
+
+    assert success is False
+    assert size == 0
+    assert error
+    assert not output.exists()
